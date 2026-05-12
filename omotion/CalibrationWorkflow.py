@@ -110,10 +110,12 @@ class CalibrationResultRow:
     avg_contrast: float
     bfi: float
     bvi: float
+    dark: float
     mean_test: str
     contrast_test: str
     bfi_test: str
     bvi_test: str
+    dark_test: str
     security_id: str
     hwid: str
 
@@ -379,6 +381,7 @@ def evaluate_passed(rows: list[CalibrationResultRow]) -> bool:
         and r.contrast_test == "PASS"
         and r.bfi_test == "PASS"
         and r.bvi_test == "PASS"
+        and r.dark_test != "FAIL"
         for r in rows
     )
 

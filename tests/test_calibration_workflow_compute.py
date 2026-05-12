@@ -83,9 +83,9 @@ def test_write_result_csv_round_trip(tmp_path):
     rows = [
         CalibrationResultRow(
             camera_index=0, side="left", cam_id=0,
-            mean=200.0, avg_contrast=0.4, bfi=5.0, bvi=5.5,
+            mean=200.0, avg_contrast=0.4, bfi=5.0, bvi=5.5, dark=0.0,
             mean_test="PASS", contrast_test="PASS",
-            bfi_test="PASS", bvi_test="FAIL",
+            bfi_test="PASS", bvi_test="FAIL", dark_test="NA",
             security_id="sec-0", hwid="hw-x",
         ),
     ]
@@ -141,9 +141,9 @@ def test_write_result_json_includes_full_provenance(tmp_path):
     rows = [
         CalibrationResultRow(
             camera_index=0, side="left", cam_id=0,
-            mean=200.0, avg_contrast=0.4, bfi=5.0, bvi=5.5,
+            mean=200.0, avg_contrast=0.4, bfi=5.0, bvi=5.5, dark=0.0,
             mean_test="PASS", contrast_test="PASS",
-            bfi_test="PASS", bvi_test="FAIL",
+            bfi_test="PASS", bvi_test="FAIL", dark_test="NA",
             security_id="cam-uid-aaa", hwid="left-hwid-aaa",
         ),
     ]
@@ -243,3 +243,32 @@ def test_thresholds_max_dark_accepts_list():
         max_dark_per_camera=[3.0] * 8,
     )
     assert t.max_dark_per_camera == [3.0] * 8
+
+
+def _dark_row(*, dark_test="NA", dark=0.0, mean_test="PASS",
+              contrast_test="PASS", bfi_test="PASS", bvi_test="PASS"):
+    return CalibrationResultRow(
+        camera_index=0, side="left", cam_id=0,
+        mean=100.0, avg_contrast=0.3, bfi=4.0, bvi=4.0, dark=dark,
+        mean_test=mean_test, contrast_test=contrast_test,
+        bfi_test=bfi_test, bvi_test=bvi_test, dark_test=dark_test,
+        security_id="", hwid="",
+    )
+
+
+def test_result_row_has_dark_fields():
+    r = _dark_row(dark=1.5, dark_test="PASS")
+    assert r.dark == 1.5
+    assert r.dark_test == "PASS"
+
+
+def test_evaluate_passed_all_pass_including_dark():
+    assert evaluate_passed([_dark_row(dark_test="PASS")]) is True
+
+
+def test_evaluate_passed_dark_fail_overrides_all_other_pass():
+    assert evaluate_passed([_dark_row(dark_test="FAIL")]) is False
+
+
+def test_evaluate_passed_dark_na_does_not_gate():
+    assert evaluate_passed([_dark_row(dark_test="NA")]) is True

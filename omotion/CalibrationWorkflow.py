@@ -753,12 +753,16 @@ def _run_subscan_capture(
     twice on the same data.
 
     Returns ``(left_path, right_path, captured_samples, dark_samples)``.
-    ``captured_samples`` is the in-window averaging set (laser-on, the
-    historical return). ``dark_samples`` is the leading + trailing
-    out-of-window samples (laser-off; per-camera mean is ambient light,
-    used by the FT calibration's #122 ambient-light gate). Raises
-    ``RuntimeError`` on scan failure. Honors ``stop_evt`` by calling
-    ``cancel_scan`` and returning empty paths + empty lists.
+    ``captured_samples`` is the in-window averaging set (laser-on
+    corrected Samples, the historical return). ``dark_samples`` is
+    the laser-off frames the science pipeline emits via
+    ``on_dark_frame_fn``: each sample has ``is_dark=True,
+    is_corrected=False`` and ``mean = u1 - PEDESTAL_HEIGHT`` —
+    pedestal-subtracted ambient DN, same convention the CQ ambient
+    gate uses (see motion_connector.py's _on_dark_frame). Used by the
+    FT calibration's #122 ambient-light gate. Raises ``RuntimeError``
+    on scan failure. Honors ``stop_evt`` by calling ``cancel_scan``
+    and returning empty paths + empty lists.
     """
     scan_req = ScanRequest(
         subject_id=subject_id,
@@ -780,11 +784,17 @@ def _run_subscan_capture(
     def _on_corrected_batch(batch: CorrectedBatch) -> None:
         for s in batch.samples:
             if s.absolute_frame_id < skip_leading_frames:
-                dark.append(s)
-            elif s.absolute_frame_id >= upper_bound:
-                dark.append(s)
-            else:
-                captured.append(s)
+                continue
+            if s.absolute_frame_id >= upper_bound:
+                continue
+            captured.append(s)
+
+    def _on_dark_frame(s: Sample) -> None:
+        # Dark frames don't reach on_corrected_batch — the science
+        # pipeline routes them here with mean already pedestal-
+        # subtracted. Every dark frame in the schedule is a valid
+        # ambient reading; no frame-id windowing applies.
+        dark.append(s)
 
     evt = threading.Event()
     holder: dict[str, ScanResult] = {}
@@ -796,6 +806,7 @@ def _run_subscan_capture(
     started = interface.scan_workflow.start_scan(
         scan_req,
         on_corrected_batch_fn=_on_corrected_batch,
+        on_dark_frame_fn=_on_dark_frame,
         on_complete_fn=_on_complete,
         log_dark_endpoints=True,
     )

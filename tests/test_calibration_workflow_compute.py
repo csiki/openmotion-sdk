@@ -97,8 +97,8 @@ def test_write_result_csv_round_trip(tmp_path):
     header = content[0].split(",")
     assert header == [
         "camera_index", "side", "cam",
-        "mean", "avg_contrast", "bfi", "bvi",
-        "mean_test", "contrast_test", "bfi_test", "bvi_test",
+        "mean", "avg_contrast", "bfi", "bvi", "dark",
+        "mean_test", "contrast_test", "bfi_test", "bvi_test", "dark_test",
         "security_id", "hwid",
     ]
     fields = content[1].split(",")
@@ -379,3 +379,61 @@ def test_dark_test_fail_when_no_dark_samples_for_active_camera():
     )
     assert math.isnan(rows[0].dark)
     assert rows[0].dark_test == "FAIL"
+
+
+import csv as _csv
+
+
+def test_write_result_csv_includes_dark_columns(tmp_path):
+    rows = [_dark_row(dark=1.5, dark_test="PASS")]
+    path = str(tmp_path / "with-dark.csv")
+    write_result_csv(path, rows)
+    with open(path, newline="", encoding="utf-8") as f:
+        reader = _csv.DictReader(f)
+        assert "dark" in reader.fieldnames
+        assert "dark_test" in reader.fieldnames
+        row0 = next(reader)
+        assert float(row0["dark"]) == 1.5
+        assert row0["dark_test"] == "PASS"
+
+
+def test_write_result_json_includes_dark(tmp_path):
+    rows = [
+        CalibrationResultRow(
+            camera_index=0, side="left", cam_id=0,
+            mean=200.0, avg_contrast=0.4, bfi=5.0, bvi=5.5, dark=1.5,
+            mean_test="PASS", contrast_test="PASS",
+            bfi_test="PASS", bvi_test="PASS", dark_test="PASS",
+            security_id="cam-uid-aaa", hwid="left-hwid-aaa",
+        ),
+    ]
+    thr = CalibrationThresholds(
+        min_mean_per_camera=[50.0] * 8,
+        min_contrast_per_camera=[0.25] * 8,
+        min_bfi_per_camera=[-0.25] * 8,
+        min_bvi_per_camera=[4.75] * 8,
+        max_bfi_per_camera=[0.25] * 8,
+        max_bvi_per_camera=[5.25] * 8,
+        max_dark_per_camera=[3.0] * 8,
+    )
+    req = CalibrationRequest(
+        operator_id="op", output_dir=str(tmp_path),
+        left_camera_mask=0xFF, right_camera_mask=0xFF,
+        thresholds=thr, duration_sec=5,
+    )
+    out = tmp_path / "with-dark.json"
+    write_result_json(
+        str(out),
+        started_timestamp="20260512_140000",
+        passed=True, canceled=False, error="",
+        request=req, rows=rows, calibration=None,
+        scan_paths={"calibration_left": "", "calibration_right": "",
+                    "validation_left": "", "validation_right": ""},
+        interface=_FakeInterface(),
+    )
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["thresholds"]["max_dark_per_camera"] == [3.0] * 8
+    cam = data["cameras"][0]
+    assert cam["dark"] == 1.5
+    assert cam["max_dark"] == 3.0
+    assert cam["dark_test"] == "PASS"

@@ -421,8 +421,8 @@ def evaluate_passed(rows: list[CalibrationResultRow]) -> bool:
 
 _CSV_FIELDS = [
     "camera_index", "side", "cam",
-    "mean", "avg_contrast", "bfi", "bvi",
-    "mean_test", "contrast_test", "bfi_test", "bvi_test",
+    "mean", "avg_contrast", "bfi", "bvi", "dark",
+    "mean_test", "contrast_test", "bfi_test", "bvi_test", "dark_test",
     "security_id", "hwid",
 ]
 
@@ -451,10 +451,12 @@ def write_result_csv(path: str, rows: list[CalibrationResultRow]) -> None:
                 "avg_contrast": f"{r.avg_contrast:.6f}",
                 "bfi": f"{r.bfi:.4f}",
                 "bvi": f"{r.bvi:.4f}",
+                "dark": f"{r.dark:.4f}",
                 "mean_test": r.mean_test,
                 "contrast_test": r.contrast_test,
                 "bfi_test": r.bfi_test,
                 "bvi_test": r.bvi_test,
+                "dark_test": r.dark_test,
                 "security_id": r.security_id,
                 "hwid": r.hwid,
             })
@@ -568,6 +570,9 @@ def _row_with_thresholds(
         "min_bvi": _get(thresholds.min_bvi_per_camera, r.cam_id),
         "max_bvi": _get(thresholds.max_bvi_per_camera, r.cam_id),
         "bvi_test": r.bvi_test,
+        "dark": r.dark,
+        "max_dark": _get(thresholds.max_dark_per_camera, r.cam_id),
+        "dark_test": r.dark_test,
     }
 
 
@@ -643,6 +648,10 @@ def write_result_json(
             "max_bvi_per_camera": (
                 list(request.thresholds.max_bvi_per_camera)
                 if request.thresholds.max_bvi_per_camera is not None else None
+            ),
+            "max_dark_per_camera": (
+                list(request.thresholds.max_dark_per_camera)
+                if request.thresholds.max_dark_per_camera is not None else None
             ),
         },
         "calibration": _calibration_to_dict(calibration),

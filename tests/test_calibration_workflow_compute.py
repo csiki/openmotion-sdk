@@ -272,3 +272,110 @@ def test_evaluate_passed_dark_fail_overrides_all_other_pass():
 
 def test_evaluate_passed_dark_na_does_not_gate():
     assert evaluate_passed([_dark_row(dark_test="NA")]) is True
+
+
+# ----- _build_result_rows_from_samples dark-test path (#122) -----
+
+import math
+
+from omotion.CalibrationWorkflow import _build_result_rows_from_samples
+from omotion.MotionProcessing import Sample
+
+
+def _light(side, cam_id, *, mean=200.0, contrast=0.3, bfi=4.0, bvi=6.0,
+           frame_id=10):
+    return Sample(
+        side=side, cam_id=cam_id,
+        frame_id=frame_id, absolute_frame_id=frame_id,
+        timestamp_s=0.0, row_sum=0, temperature_c=0.0,
+        mean=mean, std_dev=mean * contrast, contrast=contrast,
+        bfi=bfi, bvi=bvi,
+        is_corrected=True, is_dark=False,
+    )
+
+
+def _dark(side, cam_id, *, mean=1.0, frame_id=0):
+    # Dark samples come from the firmware's leading/trailing windows;
+    # only the per-camera mean matters for the ambient gate.
+    return Sample(
+        side=side, cam_id=cam_id,
+        frame_id=frame_id, absolute_frame_id=frame_id,
+        timestamp_s=0.0, row_sum=0, temperature_c=0.0,
+        mean=mean, std_dev=0.0, contrast=0.0,
+        bfi=0.0, bvi=0.0,
+        is_corrected=True, is_dark=True,
+    )
+
+
+def _full_thresholds(*, max_dark_per_camera=None):
+    return CalibrationThresholds(
+        min_mean_per_camera=[100.0] * 8,
+        min_contrast_per_camera=[0.2] * 8,
+        min_bfi_per_camera=[-1.0] * 8,
+        min_bvi_per_camera=[5.0] * 8,
+        max_dark_per_camera=max_dark_per_camera,
+    )
+
+
+def test_dark_test_pass_when_below_threshold():
+    light = [_light(side, 0) for side in ("left", "right")]
+    dark = [_dark(side, 0, mean=1.0) for side in ("left", "right")]
+    rows = _build_result_rows_from_samples(
+        light, dark_samples=dark,
+        left_camera_mask=0x01, right_camera_mask=0x01,
+        thresholds=_full_thresholds(max_dark_per_camera=[3.0] * 8),
+        sensor_left=None, sensor_right=None,
+    )
+    assert len(rows) == 2
+    assert all(r.dark_test == "PASS" for r in rows)
+    assert all(r.dark == 1.0 for r in rows)
+
+
+def test_dark_test_fail_when_above_threshold():
+    light = [_light("left", 0)]
+    dark = [_dark("left", 0, mean=5.0)]
+    rows = _build_result_rows_from_samples(
+        light, dark_samples=dark,
+        left_camera_mask=0x01, right_camera_mask=0x00,
+        thresholds=_full_thresholds(max_dark_per_camera=[3.0] * 8),
+        sensor_left=None, sensor_right=None,
+    )
+    assert rows[0].dark == 5.0
+    assert rows[0].dark_test == "FAIL"
+
+
+def test_dark_test_na_when_threshold_missing():
+    light = [_light("left", 0)]
+    dark = [_dark("left", 0, mean=5.0)]
+    rows = _build_result_rows_from_samples(
+        light, dark_samples=dark,
+        left_camera_mask=0x01, right_camera_mask=0x00,
+        thresholds=_full_thresholds(max_dark_per_camera=None),
+        sensor_left=None, sensor_right=None,
+    )
+    assert rows[0].dark_test == "NA"
+
+
+def test_dark_value_present_on_passing_run():
+    light = [_light("left", 0)]
+    dark = [_dark("left", 0, mean=2.0)]
+    rows = _build_result_rows_from_samples(
+        light, dark_samples=dark,
+        left_camera_mask=0x01, right_camera_mask=0x00,
+        thresholds=_full_thresholds(max_dark_per_camera=[3.0] * 8),
+        sensor_left=None, sensor_right=None,
+    )
+    assert rows[0].dark == 2.0
+    assert rows[0].dark_test == "PASS"
+
+
+def test_dark_test_fail_when_no_dark_samples_for_active_camera():
+    light = [_light("left", 0)]
+    rows = _build_result_rows_from_samples(
+        light, dark_samples=[],
+        left_camera_mask=0x01, right_camera_mask=0x00,
+        thresholds=_full_thresholds(max_dark_per_camera=[3.0] * 8),
+        sensor_left=None, sensor_right=None,
+    )
+    assert math.isnan(rows[0].dark)
+    assert rows[0].dark_test == "FAIL"

@@ -301,6 +301,7 @@ def _combined_test(*results: str) -> str:
 def _build_result_rows_from_samples(
     samples: list[Sample],
     *,
+    dark_samples: Optional[list[Sample]] = None,
     left_camera_mask: int,
     right_camera_mask: int,
     thresholds: CalibrationThresholds,
@@ -309,10 +310,19 @@ def _build_result_rows_from_samples(
 ) -> list[CalibrationResultRow]:
     """Core row aggregation: per-camera mean/contrast/BFI/BVI averages
     and threshold pass/fail. Pure function — caller pre-filters.
+
+    ``dark_samples`` is the leading + trailing out-of-window samples
+    from the validation scan (laser off; per-camera mean is the
+    ambient-light reading). When supplied alongside
+    ``thresholds.max_dark_per_camera`` the row builder also evaluates
+    the dark gate (#122). When either is absent each row's
+    ``dark_test`` is ``"NA"`` and ``dark`` is the measured mean (NaN
+    if no dark samples were captured for that camera).
     """
     rows: list[CalibrationResultRow] = []
     masks = (left_camera_mask, right_camera_mask)
     sensors = (sensor_left, sensor_right)
+    dark_samples = dark_samples or []
 
     for module_idx, side in enumerate(("left", "right")):
         mask = masks[module_idx]
@@ -331,6 +341,27 @@ def _build_result_rows_from_samples(
             contrast_val = float(np.mean([s.contrast for s in cam_samples]))
             bfi_val = float(np.mean([s.bfi for s in cam_samples]))
             bvi_val = float(np.mean([s.bvi for s in cam_samples]))
+
+            cam_dark_samples = [
+                s for s in dark_samples
+                if s.side == side and s.cam_id == cam_id
+            ]
+            if cam_dark_samples:
+                dark_val = float(np.mean([s.mean for s in cam_dark_samples]))
+            else:
+                dark_val = float("nan")
+
+            if thresholds.max_dark_per_camera is None:
+                dark_test = "NA"
+            elif cam_id >= len(thresholds.max_dark_per_camera):
+                dark_test = "NA"
+            elif not cam_dark_samples:
+                # Active camera but zero dark frames captured — surface
+                # as FAIL rather than silently passing.
+                dark_test = "FAIL"
+            else:
+                cap = thresholds.max_dark_per_camera[cam_id]
+                dark_test = "PASS" if dark_val <= float(cap) else "FAIL"
 
             security_id = ""
             hwid = ""
@@ -362,12 +393,12 @@ def _build_result_rows_from_samples(
                 avg_contrast=contrast_val,
                 bfi=bfi_val,
                 bvi=bvi_val,
-                dark=0.0,          # placeholder, real value lands in #122 task 4
+                dark=dark_val,
                 mean_test=_threshold_test(mean_val, thresholds.min_mean_per_camera, cam_id),
                 contrast_test=_threshold_test(contrast_val, thresholds.min_contrast_per_camera, cam_id),
                 bfi_test=bfi_test,
                 bvi_test=bvi_test,
-                dark_test="NA",    # placeholder, real value lands in #122 task 4
+                dark_test=dark_test,
                 security_id=security_id,
                 hwid=hwid,
             ))
@@ -1073,6 +1104,7 @@ class CalibrationWorkflow:
                 logger.info("Calibration phase 5: aggregating per-camera rows + thresholds.")
                 rows = _build_result_rows_from_samples(
                     val_samples,
+                    dark_samples=val_dark_samples,
                     left_camera_mask=request.left_camera_mask,
                     right_camera_mask=request.right_camera_mask,
                     thresholds=request.thresholds,

@@ -1,6 +1,11 @@
-"""MomentsStage — vectorized first/second moment + std + contrast.
+"""MomentsStage — vectorized first/second moment + std.
 
 See docs/SciencePipeline.md §6.
+
+Note: contrast_raw is intentionally NOT computed here. Spec §7.1 defines
+K = std / (u1 - pedestal), i.e. pedestal-subtracted mean, but MomentsStage
+has no pedestal. Pedestal-subtracted contrast is computed downstream in
+BfiBviStage. contrast_raw is left as None.
 """
 
 from __future__ import annotations
@@ -29,12 +34,9 @@ class MomentsStage:
 
         mean = np.where(counts > 0, u1, np.nan)
 
-        with np.errstate(divide='ignore', invalid='ignore'):
-            contrast = np.where(mean > 0, std / mean, np.nan)
-
         batch.mean_raw     = mean.astype(np.float32)
         batch.std_raw      = std.astype(np.float32)
-        batch.contrast_raw = contrast.astype(np.float32)
+        batch.contrast_raw = None
         return batch
 
     def reset(self) -> None:

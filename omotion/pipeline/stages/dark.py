@@ -14,7 +14,10 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Optional
 
-from ..batch import DarkIntegrityWarning
+import numpy as np
+
+from ..batch import DarkIntegrityWarning, FrameBatch, IntervalClosed
+from ..pedestal import SensorPedestals
 
 
 @dataclass(frozen=True)
@@ -274,3 +277,126 @@ class DarkFrameQuadraticStencil:
             return v_plus_1
 
         raise ValueError("DarkFrameQuadraticStencil needs at least v_plus_1")
+
+
+class DarkCorrectionStage:
+    """Orchestrates the dual-output dark correction.
+
+    Per non-dark frame: populates batch.dark_baseline_rt, batch.mean_dc_rt,
+    batch.std_dc_rt using HybridRealtimePredictor (NaN where no prediction
+    is available — the warmup window).
+
+    Per dark frame: runs the integrity guard, appends to DarkHistory + the
+    appropriate PendingInterval, and emits an IntervalClosed event when an
+    interval bookends.
+
+    on_scan_stop(batch) performs the terminal-dark flush — for short scans
+    that end before a second scheduled dark, synthesizes a dark from the
+    last buffered moment so a corrected batch can still be emitted.
+
+    See docs/SciencePipeline.md §7.4 (realtime) and §8 (batched).
+    """
+    name = "dark_correction"
+
+    SIDE_NAMES = ("left", "right")
+
+    def __init__(self, *,
+                 realtime_estimator: HybridRealtimePredictor,
+                 batch_estimator: LinearInterpolation,
+                 pedestals: Optional[SensorPedestals] = None,
+                 realtime_history_size: int = 4,
+                 integrity_max_above_pedestal: float = 30.0):
+        self._realtime = realtime_estimator
+        self._batch = batch_estimator
+        self._pedestals = pedestals or SensorPedestals(left=64.0, right=64.0)
+        self._history = DarkHistory(max_darks=realtime_history_size)
+        self._pending: dict[tuple[str, int], PendingInterval] = {}
+        self._guard = DarkIntegrityGuard(
+            max_above_pedestal=integrity_max_above_pedestal
+        )
+
+    def process(self, batch: FrameBatch) -> FrameBatch:
+        n = batch.frame_ids.shape[0]
+        baseline_rt = np.full((n, 2, 8), np.nan, dtype=np.float32)
+        mean_dc_rt  = np.full((n, 2, 8), np.nan, dtype=np.float32)
+        std_dc_rt   = np.full((n, 2, 8), np.nan, dtype=np.float32)
+
+        for i in range(n):
+            ftype = str(batch.frame_type[i])
+            if ftype not in ("light", "dark"):
+                continue
+            cam_id  = int(batch.cam_ids[i])
+            abs_id  = int(batch.abs_frame_ids[i])
+            t       = float(batch.timestamp_s[i])
+            side_idx = int(np.argmax(batch.raw_histograms[i].sum(axis=(-2, -1))))
+            side = self.SIDE_NAMES[side_idx]
+
+            u1 = float(batch.mean_raw[i, side_idx, cam_id])
+            std = float(batch.std_raw[i, side_idx, cam_id])
+
+            if ftype == "dark":
+                pedestal = (self._pedestals.left if side == "left"
+                            else self._pedestals.right)
+                self._guard.check(
+                    side=side, cam_id=cam_id, abs_frame_id=abs_id,
+                    u1=u1, pedestal=pedestal, events=batch.events,
+                )
+                self._history.append(side, cam_id, t=t, u1=u1, std=std)
+
+                pi = self._pending.get((side, cam_id))
+                if pi is None:
+                    pi = PendingInterval()
+                    self._pending[(side, cam_id)] = pi
+                    pi.set_left_dark(DarkObservation(t=t, u1=u1, std=std),
+                                     abs_frame_id=abs_id)
+                else:
+                    pi.set_right_dark(DarkObservation(t=t, u1=u1, std=std),
+                                      abs_frame_id=abs_id)
+                    if pi.is_closed():
+                        interval = pi.flush()
+                        # After flush, pi's left has rolled to the just-flushed right.
+                        corrected = self._batch.correct_interval(interval)
+                        batch.events.append(IntervalClosed(corrected_batch=corrected))
+
+            else:  # light
+                pred = self._realtime.predict(
+                    side, cam_id, history=self._history, target_t=t,
+                )
+                if pred is not None:
+                    u1_hat, std_hat = pred
+                    baseline_rt[i, side_idx, cam_id] = np.float32(u1_hat)
+                    mean_dc_rt[i, side_idx, cam_id]  = np.float32(u1 - u1_hat)
+                    raw_var = max(0.0, std ** 2)
+                    corr_var = max(0.0, raw_var - std_hat ** 2)
+                    std_dc_rt[i, side_idx, cam_id] = np.float32(corr_var ** 0.5)
+
+                    pi = self._pending.get((side, cam_id))
+                    if pi is not None:
+                        u2 = std ** 2 + u1 ** 2
+                        pi.add_light(abs_frame_id=abs_id, t=t, u1=u1, u2=u2)
+
+        batch.dark_baseline_rt = baseline_rt
+        batch.mean_dc_rt = mean_dc_rt
+        batch.std_dc_rt = std_dc_rt
+        return batch
+
+    def reset(self) -> None:
+        self._history.clear()
+        self._pending.clear()
+
+    def on_scan_stop(self, batch: FrameBatch) -> None:
+        """Terminal dark flush — see SciencePipeline.md §8.6."""
+        for (side, cam_id), pi in self._pending.items():
+            if not pi._light:
+                continue
+            if self._history.size(side, cam_id) < 1:
+                continue
+            last = pi._light[-1]
+            terminal = DarkObservation(
+                t=last.t, u1=last.u1,
+                std=(last.u2 - last.u1 ** 2) ** 0.5,
+            )
+            pi.set_right_dark(terminal, abs_frame_id=last.abs_frame_id)
+            interval = pi.flush()
+            corrected = self._batch.correct_interval(interval)
+            batch.events.append(IntervalClosed(corrected_batch=corrected))

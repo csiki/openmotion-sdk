@@ -49,22 +49,53 @@ def start_scan(
 
 **After:**
 ```python
-def start_scan(
-    self,
-    request: ScanRequest,
-    sinks: list[Sink] | None = None,    # app-provided UI / CQ / custom sinks
-    ...
-) -> bool: ...
+def start_scan(self, request: ScanRequest) -> bool: ...
 ```
 
-The 6 legacy `on_*_fn` kwargs are removed entirely.
+The 6 legacy `on_*_fn` kwargs are removed entirely. Sinks now travel **on the `ScanRequest` itself** — see §3.1.1 below.
 
-### 3.2 Sink composition inside `start_scan()`
+### 3.1.1 `ScanRequest` carries sinks
 
-The SDK constructs only the Source and the Pipeline. **All sinks** (UI, contact-quality, storage) are app-provided via the `sinks=` kwarg:
+`ScanRequest` gains a `sinks: list[Sink] = field(default_factory=list)` field. The single dataclass captures the entire "what to do with this scan" contract: scan parameters + raw-save behavior + where the output goes:
 
 ```python
-def start_scan(self, request, sinks=None, ...):
+@dataclass
+class ScanRequest:
+    subject_id:          str
+    duration_sec:        int
+    left_camera_mask:    int
+    right_camera_mask:   int
+    reduced_mode:        bool
+    raw_save_max_duration_s: Optional[float] = None  # see §3.2.1
+    rolling_avg_window:  Optional[int] = None
+    batch_size_frames:   Optional[int] = None
+    sinks:               list[Sink] = field(default_factory=list)
+    # ... other scan parameters
+```
+
+If `sinks` is empty, no sinks subscribe to any channel — the scan still runs but nothing is written or surfaced to the UI. (That's an explicit consequence of "no implicit defaults"; the SDK never silently constructs sinks the app didn't ask for.)
+
+Call shape:
+```python
+req = ScanRequest(
+    subject_id="...",
+    duration_sec=300,
+    ...,
+    sinks=[
+        _LivePlotSink(connector=self),
+        _ContactQualityCheckSink(connector=self),
+        CsvSink(output_dir=self._app_config.data_directory),
+    ],
+)
+self._interface.start_scan(req)
+```
+
+### 3.2 Pipeline construction inside `start_scan()`
+
+The SDK constructs only the Source and the Pipeline; sinks travel on `request.sinks` (see §3.1.1):
+
+```python
+def start_scan(self, request):
     meta = ScanMetadata(
         scan_id=request.scan_id, subject_id=request.subject_id,
         operator=request.operator, started_at_iso=...,
@@ -106,14 +137,13 @@ def start_scan(self, request, sinks=None, ...):
         metadata=meta,
     )
 
-    user_sinks = sinks or []
-    self._runner = ScanRunner(source=source, pipeline=pipeline, sinks=user_sinks)
+    self._runner = ScanRunner(source=source, pipeline=pipeline, sinks=request.sinks)
     self._scan_thread = threading.Thread(target=self._runner.run, daemon=True)
     self._scan_thread.start()
     return True
 ```
 
-**Apps construct their own storage sinks**, including `CsvSink` and `ScanDBSink`. Sinks are dumb consumers; they write everything they receive on subscribed channels. The raw-save *gate* lives on the pipeline's `Tee("raw")` (see §3.2.1).
+**Apps construct their own storage sinks** including `CsvSink` and `ScanDBSink` and pass them as part of the `ScanRequest.sinks` list. Sinks are dumb consumers; they write everything they receive on subscribed channels. The raw-save *gate* lives on the pipeline's `Tee("raw")` (see §3.2.1).
 
 ### 3.2.1 Raw-save gating moves from sinks to the Tee
 
@@ -360,7 +390,7 @@ class _ContactQualityCheckSink:
 
 
 # In start_scan call site (replaces the 4-callback kwarg call):
-# The app constructs storage sinks itself with destination paths from config.
+# All sinks AND the raw-save gate are bundled into the ScanRequest itself.
 sinks = [
     _LivePlotSink(connector=self),
     _ContactQualityCheckSink(connector=self),
@@ -372,12 +402,17 @@ if self._app_config.scan_db_enabled:
 # Raw-save gate is computed from app config and lives on the request — the
 # SDK passes it to default_pipeline so the Tee("raw") enforces it uniformly
 # across CsvSink, ScanDBSink, and any other sink subscribed to "raw".
-request.raw_save_max_duration_s = (
+raw_max = (
     self._app_config.raw_data_duration_sec
     if self._app_config.write_raw_data else 0
 )
 
-self._interface.start_scan(request, sinks=sinks)
+request = ScanRequest(
+    subject_id="...", duration_sec=300, ...,
+    raw_save_max_duration_s=raw_max,
+    sinks=sinks,
+)
+self._interface.start_scan(request)
 ```
 
 **Code removed from `motion_connector.py`:**

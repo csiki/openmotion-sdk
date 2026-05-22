@@ -67,8 +67,6 @@ def _make_meta(scan_id: str = "golden_normal") -> ScanMetadata:
         left_camera_mask=0x01,
         right_camera_mask=0,
         reduced_mode=False,
-        write_raw_csv=False,
-        raw_csv_duration_sec=None,
     )
 
 

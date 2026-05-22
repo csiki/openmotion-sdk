@@ -59,8 +59,6 @@ def _make_request(
     reduced_mode: bool = False,
     subject_id: str = "csvSinkTest",
     write_corrected_csv: bool = True,
-    write_raw_csv: bool = False,
-    raw_csv_duration_sec: float | None = None,
 ) -> ScanRequest:
     return ScanRequest(
         subject_id=subject_id,
@@ -70,8 +68,6 @@ def _make_request(
         data_dir=str(tmp_path),
         disable_laser=False,
         write_corrected_csv=write_corrected_csv,
-        write_raw_csv=write_raw_csv,
-        raw_csv_duration_sec=raw_csv_duration_sec,
         reduced_mode=reduced_mode,
     )
 
@@ -284,7 +280,7 @@ def test_csv_sink_opens_raw_csvs_per_active_side(tmp_path: Path) -> None:
         ts="20260520_130000",
         session_start_ts=0.0,
         request=_make_request(
-            tmp_path, write_raw_csv=True,
+            tmp_path,
             left_mask=0x66, right_mask=0x42,
         ),
         meta={},
@@ -306,7 +302,7 @@ def test_csv_sink_no_raw_csv_when_disabled(tmp_path: Path) -> None:
     sink = CsvSink()
     sink.on_scan_start(
         ts="t", session_start_ts=0.0,
-        request=_make_request(tmp_path, write_raw_csv=False),
+        request=_make_request(tmp_path),
         meta={},
     )
     sink.on_complete()
@@ -320,7 +316,7 @@ def test_csv_sink_no_raw_csv_for_inactive_side(tmp_path: Path) -> None:
     sink.on_scan_start(
         ts="t", session_start_ts=0.0,
         request=_make_request(
-            tmp_path, write_raw_csv=True,
+            tmp_path,
             left_mask=0xFF, right_mask=0x00,
         ),
         meta={},
@@ -336,7 +332,7 @@ def test_csv_sink_writes_raw_row_per_call(tmp_path: Path) -> None:
     sink.on_scan_start(
         ts="t", session_start_ts=0.0,
         request=_make_request(
-            tmp_path, write_raw_csv=True,
+            tmp_path,
             left_mask=0xFF, right_mask=0xFF,
         ),
         meta={},
@@ -375,9 +371,8 @@ def test_csv_sink_raw_duration_cap(tmp_path: Path) -> None:
     sink.on_scan_start(
         ts="t", session_start_ts=0.0,
         request=_make_request(
-            tmp_path, write_raw_csv=True,
+            tmp_path,
             left_mask=0xFF, right_mask=0xFF,
-            raw_csv_duration_sec=1.0,
         ),
         meta={},
     )

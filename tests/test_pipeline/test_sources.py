@@ -17,7 +17,6 @@ def _meta():
         scan_id="x", subject_id="y", operator="z",
         started_at_iso="2026-05-22T00:00:00Z", duration_sec=60,
         left_camera_mask=0xFF, right_camera_mask=0, reduced_mode=False,
-        write_raw_csv=False, raw_csv_duration_sec=None,
     )
 
 

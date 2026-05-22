@@ -30,6 +30,31 @@ PR 2 + PR 3 of the 3-PR sequence: switch `ScanWorkflow` to use the new `omotion.
 
 ## 3. SDK-side cutover
 
+### 3.0 `MotionInterface` gains baseline output configuration
+
+CSV and scan-DB writing are SDK defaults, not app-level decisions. The SDK constructor takes the output paths once; every scan automatically writes to them. Apps never construct `CsvSink` or `ScanDBSink`.
+
+```python
+motion = MotionInterface(
+    data_dir="C:/Users/ethan/Projects/scan_data",   # CSV output dir; None = no CSV
+    scan_db_path=None,                                # optional; None = no DB
+    # ... existing kwargs
+)
+```
+
+`ScanWorkflow.start_scan()` auto-injects the matching storage sinks:
+
+```python
+default_sinks: list[Sink] = []
+if self._interface.data_dir is not None:
+    default_sinks.append(CsvSink(output_dir=self._interface.data_dir))
+if self._interface.scan_db_path is not None:
+    default_sinks.append(ScanDBSink(db_path=self._interface.scan_db_path))
+all_sinks = default_sinks + list(request.sinks)
+```
+
+Internal SDK workflows that don't want default storage set `request.skip_default_storage=True` (see §3.1.2).
+
 ### 3.1 `ScanWorkflow.start_scan()` signature change
 
 **Before:**
@@ -83,12 +108,23 @@ req = ScanRequest(
     ...,
     sinks=[
         _LivePlotSink(connector=self),
-        _ContactQualityCheckSink(connector=self),
-        CsvSink(output_dir=self._app_config.data_directory),
     ],
 )
 self._interface.start_scan(req)
 ```
+
+Storage sinks (`CsvSink`, `ScanDBSink`) are **SDK-managed**, not app-constructed — see §3.0. Contact-quality is its own workflow, not a sink — see §3.8.
+
+### 3.1.2 `skip_default_storage` flag (internal SDK use)
+
+```python
+@dataclass
+class ScanRequest:
+    ...
+    skip_default_storage: bool = False   # internal SDK workflows set True
+```
+
+When `True`, `start_scan` skips auto-injection of the default `CsvSink` / `ScanDBSink`. Used by internal SDK workflows (`ContactQualityWorkflow`, `CalibrationWorkflow`) whose short diagnostic scans shouldn't write production CSVs. Apps never set this.
 
 ### 3.2 Pipeline construction inside `start_scan()`
 
@@ -137,9 +173,19 @@ def start_scan(self, request):
         metadata=meta,
     )
 
+    # Auto-inject default storage sinks unless the caller opted out (internal
+    # SDK workflows do this for diagnostic scans — see §3.0 / §3.1.2).
+    default_sinks: list[Sink] = []
+    if not request.skip_default_storage:
+        if self._interface.data_dir is not None:
+            default_sinks.append(CsvSink(output_dir=self._interface.data_dir))
+        if self._interface.scan_db_path is not None:
+            default_sinks.append(ScanDBSink(db_path=self._interface.scan_db_path))
+    all_sinks = default_sinks + list(request.sinks)
+
     # Auxiliary sources are auto-wired based on which channels the sinks subscribe to.
     # Today: telemetry. Future: IMU, ambient light, etc. — same pattern.
-    subscribed_channels = {ch for s in request.sinks for ch in s.channels}
+    subscribed_channels = {ch for s in all_sinks for ch in s.channels}
     telemetry_source = None
     if "telemetry" in subscribed_channels:
         telemetry_source = ConsoleTelemetrySource(
@@ -147,7 +193,7 @@ def start_scan(self, request):
         )
 
     self._runner = ScanRunner(
-        source=source, pipeline=pipeline, sinks=request.sinks,
+        source=source, pipeline=pipeline, sinks=all_sinks,
         telemetry_source=telemetry_source,
     )
     self._scan_thread = threading.Thread(target=self._runner.run, daemon=True)
@@ -347,12 +393,17 @@ class _CalibrationCollectorSink:
 
 # In run_calibration:
 collector = _CalibrationCollectorSink()
-interface.scan_workflow.start_scan(request, sinks=[collector])
+request = ScanRequest(
+    ...,
+    sinks=[collector],
+    skip_default_storage=True,   # diagnostic scan; no production CSV/DB
+)
+interface.scan_workflow.start_scan(request)
 self._await_scan_complete()
 # Use collector.intervals to compute the (2, 8) calibration arrays
 ```
 
-Same pattern for any other internal SDK callers (none expected beyond `CalibrationWorkflow`).
+The `skip_default_storage=True` opts out of the SDK's auto-injected `CsvSink` / `ScanDBSink` — calibration scans are diagnostic and shouldn't write production data-of-record CSVs. Same opt-out for `ContactQualityWorkflow` (§3.8).
 
 ### 3.6 Telemetry channel (developer-mode `_telemetry.csv`)
 
@@ -529,7 +580,151 @@ The telemetry stream is **not** synchronized to the histogram stream — it's po
 
 This generalizes for future probes: when an IMU source or ambient-light source lands, it follows the same pattern. The IMU source's sink subscribes to `"imu"`; `ScanWorkflow.start_scan` detects the channel and auto-wires the source. No changes to `ScanRequest`'s public shape.
 
-### 3.7 Test-scan support (from feature/132)
+### 3.8 ContactQualityWorkflow — moves CQ from app to SDK
+
+The legacy bloodflow-app owns contact-quality (CQ) check logic: a short scan that monitors per-camera signal levels against dark/light thresholds, returning pass/fail. This is a clinical *procedure*, not a UI concern — the GUI's only job is to display the result. PR 2 moves it to the SDK, symmetric with `CalibrationWorkflow`.
+
+**New module: `omotion/ContactQualityWorkflow.py`** (~150 LOC including the internal sink).
+
+```python
+@dataclass
+class CamCQResult:
+    side:     str
+    cam_id:   int
+    passed:   bool
+    avg_bfi:  float
+    reason:   str   # "ok" | "below_dark" | "above_light" | "no_signal"
+
+
+@dataclass
+class ContactQualityResult:
+    passed:      bool                                    # all active cams passed
+    per_camera:  dict[tuple[str, int], CamCQResult]
+    duration_sec: float
+
+
+class _ContactQualitySink:
+    """Internal: collects rolling-averaged BFI per camera during a short scan.
+    Not exposed to apps."""
+    channels = {"rolling"}
+
+    def __init__(self, dark_thresholds, light_thresholds):
+        self._dark = dark_thresholds   # list[float], length 8
+        self._light = light_thresholds
+        self._accum: dict[tuple[str, int], list[float]] = {}
+
+    def on_scan_start(self, meta): pass
+
+    def consume(self, channel, batch):
+        # batch.bfi_rolling has shape (N, 2, 8); accumulate per-cam
+        for i in range(batch.bfi_rolling.shape[0]):
+            if batch.frame_type[i] in ("warmup", "stale"):
+                continue
+            for side_idx, side in enumerate(("left", "right")):
+                for cam_id in range(8):
+                    v = float(batch.bfi_rolling[i, side_idx, cam_id])
+                    if not np.isfinite(v):
+                        continue
+                    self._accum.setdefault((side, cam_id), []).append(v)
+
+    def on_complete(self): pass
+
+    def result(self, *, left_mask: int, right_mask: int,
+               duration_sec: float) -> ContactQualityResult:
+        per_cam: dict[tuple[str, int], CamCQResult] = {}
+        for side_idx, (side, mask) in enumerate((("left", left_mask), ("right", right_mask))):
+            for cam_id in range(8):
+                if not (mask & (1 << cam_id)):
+                    continue
+                vals = self._accum.get((side, cam_id), [])
+                avg = float(np.mean(vals)) if vals else float("nan")
+                if not vals or not np.isfinite(avg):
+                    reason, passed = "no_signal", False
+                elif avg < self._dark[cam_id]:
+                    reason, passed = "below_dark", False
+                elif avg > self._light[cam_id]:
+                    reason, passed = "above_light", False
+                else:
+                    reason, passed = "ok", True
+                per_cam[(side, cam_id)] = CamCQResult(
+                    side=side, cam_id=cam_id, passed=passed,
+                    avg_bfi=avg, reason=reason,
+                )
+        return ContactQualityResult(
+            passed=all(r.passed for r in per_cam.values()),
+            per_camera=per_cam, duration_sec=duration_sec,
+        )
+
+
+class ContactQualityWorkflow:
+    """Run a short scan, check signal levels against thresholds, return verdict.
+
+    Symmetric with CalibrationWorkflow: uses an internal sink to collect the
+    diagnostic data, skips default storage (no CSVs for CQ checks), returns
+    a structured result the app displays via its modal.
+    """
+    def __init__(self, scan_workflow):
+        self._scan_workflow = scan_workflow
+
+    def check(self, *, duration_sec: float = 1.0,
+              rolling_window: int = 10,
+              dark_threshold_per_camera: list[float],
+              light_threshold_per_camera: list[float],
+              left_camera_mask: int, right_camera_mask: int) -> ContactQualityResult:
+        sink = _ContactQualitySink(
+            dark_thresholds=dark_threshold_per_camera,
+            light_thresholds=light_threshold_per_camera,
+        )
+        request = ScanRequest(
+            subject_id="_cq_check",
+            duration_sec=int(np.ceil(duration_sec)),
+            left_camera_mask=left_camera_mask,
+            right_camera_mask=right_camera_mask,
+            reduced_mode=False,
+            rolling_avg_window=rolling_window,
+            sinks=[sink],
+            skip_default_storage=True,   # diagnostic scan; no CSV/DB
+        )
+        self._scan_workflow.start_scan(request)
+        self._scan_workflow.await_complete(timeout_sec=duration_sec + 2.0)
+        return sink.result(
+            left_mask=left_camera_mask,
+            right_mask=right_camera_mask,
+            duration_sec=duration_sec,
+        )
+```
+
+**`MotionInterface` lazy-loads it:**
+
+```python
+@property
+def contact_quality_workflow(self) -> ContactQualityWorkflow:
+    if self._cq_workflow is None:
+        self._cq_workflow = ContactQualityWorkflow(scan_workflow=self.scan_workflow)
+    return self._cq_workflow
+```
+
+**App side becomes one call:**
+
+```python
+result = self._interface.contact_quality_workflow.check(
+    duration_sec=app_config.cq_check_duration_sec,
+    dark_threshold_per_camera=app_config.cq_dark_threshold_per_camera,
+    light_threshold_per_camera=app_config.cq_light_threshold_per_camera,
+    left_camera_mask=request.left_camera_mask,
+    right_camera_mask=request.right_camera_mask,
+)
+if not result.passed:
+    self._show_reposition_modal(result)
+```
+
+**App-side changes for this:**
+
+- Delete the CQ callback closures (`_make_contact_quality_callbacks`, `_on_dark_frame`, `_on_rolling_avg` — about 100 LOC in `motion_connector.py:2470-2582`)
+- Replace with the one-line `contact_quality_workflow.check(...)` call
+- Keep the modal display logic (UI is still app's job — only the procedure moves)
+
+### 3.9 Test-scan support (from feature/132)
 
 `CalibrationWorkflow.start_test_scan()` (added in PR #53 on `next`) uses the same callback machinery. Migrate the same way — replace its `on_corrected_batch_fn=...` with a collector sink.
 
@@ -572,35 +767,20 @@ class _LivePlotSink:
     def on_complete(self): pass
 
 
-class _ContactQualityCheckSink:
-    """'rolling' channel for smoothed BFI; 'diagnostics' for DarkIntegrityWarning events."""
-    channels = {"rolling", "diagnostics"}
-
-    def __init__(self, connector):
-        self._connector = connector
-
-    def consume(self, channel, payload):
-        if channel == "rolling":
-            # rolling-averaged BFI used for contact-quality threshold checks
-            ...
-        elif channel == "diagnostics":
-            if isinstance(payload, DarkIntegrityWarning):
-                self._connector._on_dark_integrity_warning(payload)
-
-
 # In start_scan call site (replaces the 4-callback kwarg call):
-# All sinks AND the raw-save gate are bundled into the ScanRequest itself.
-sinks = [
-    _LivePlotSink(connector=self),
-    _ContactQualityCheckSink(connector=self),
-    CsvSink(output_dir=self._app_config.data_directory),
-]
-if self._app_config.scan_db_enabled:
-    sinks.append(ScanDBSink(db_path=self._app_config.scan_db_path))
+# Storage sinks (CsvSink, ScanDBSink) are SDK-managed; the app never constructs
+# them — MotionInterface init carries data_dir / scan_db_path (see §3.0).
+# Contact quality is its own SDK workflow, not a sink (see §3.8).
+sinks = [_LivePlotSink(connector=self)]
+if self._app_config.developer_mode:
+    sinks.append(TelemetrySink(output_path=os.path.join(
+        self._app_config.data_directory, f"{scan_id}_telemetry.csv",
+    )))
 
 # Raw-save gate is computed from app config and lives on the request — the
 # SDK passes it to default_pipeline so the Tee("raw") enforces it uniformly
-# across CsvSink, ScanDBSink, and any other sink subscribed to "raw".
+# across the auto-injected CsvSink, ScanDBSink, and any other sink subscribed
+# to "raw".
 raw_max = (
     self._app_config.raw_data_duration_sec
     if self._app_config.write_raw_data else 0
@@ -612,6 +792,18 @@ request = ScanRequest(
     sinks=sinks,
 )
 self._interface.start_scan(request)
+
+# Contact quality runs as a separate SDK workflow (§3.8):
+cq = self._interface.contact_quality_workflow.check(
+    duration_sec=self._app_config.cq_check_duration_sec,
+    rolling_window=self._app_config.cq_rolling_avg_window,
+    dark_threshold_per_camera=self._app_config.cq_dark_threshold_per_camera,
+    light_threshold_per_camera=self._app_config.cq_light_threshold_per_camera,
+    left_camera_mask=request.left_camera_mask,
+    right_camera_mask=request.right_camera_mask,
+)
+if not cq.passed:
+    self._show_reposition_modal(cq)
 ```
 
 **Code removed from `motion_connector.py`:**

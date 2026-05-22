@@ -38,9 +38,12 @@ CSV and scan-DB writing are SDK defaults, not app-level decisions. The SDK const
 motion = MotionInterface(
     data_dir="C:/Users/ethan/Projects/scan_data",   # CSV output dir; None = no CSV
     scan_db_path=None,                                # optional; None = no DB
+    operator_id="bloodflow-app",                      # app identity; written into manifests/CSVs
     # ... existing kwargs
 )
 ```
+
+`operator_id` is the app's identity (e.g. `"bloodflow-app"`, `"test-app"`) and was previously a per-scan field on `ScanRequest`/`ScanMetadata`. It's constant per app, so the right home for it is SDK init. `start_scan` reads it when building `ScanMetadata`; manifests, CSVs, and scan-DB sessions all carry the same value as today. Note: this is *app* identity, not a clinician/user identifier — a per-scan user tag would be a new, separate field added later if needed.
 
 `ScanWorkflow.start_scan()` auto-injects the matching storage sinks:
 
@@ -134,7 +137,7 @@ The SDK constructs only the Source and the Pipeline; sinks travel on `request.si
 def start_scan(self, request):
     meta = ScanMetadata(
         scan_id=request.scan_id, subject_id=request.subject_id,
-        operator=request.operator, started_at_iso=...,
+        operator=self._interface.operator_id, started_at_iso=...,
         duration_sec=request.duration_sec,
         left_camera_mask=request.left_camera_mask,
         right_camera_mask=request.right_camera_mask,

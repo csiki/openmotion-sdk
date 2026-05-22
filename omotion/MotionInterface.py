@@ -49,10 +49,18 @@ class MotionInterface:
         demo_mode: bool = False,
         default_trigger_config: Optional[dict] = None,
         db_path: Optional[str] = None,
+        data_dir: Optional[str] = None,
+        scan_db_path: Optional[str] = None,
+        operator_id: Optional[str] = None,
     ):
         self.vid = vid
         self.sensor_pid = sensor_pid
         self.console_pid = console_pid
+
+        # SDK-level output config
+        self.data_dir = data_dir
+        self.scan_db_path = scan_db_path
+        self.operator_id = operator_id
 
         # Optional DB sink (issue #92). When set, ``start_scan`` builds a
         # ScanDBSink that writes corrected (and optionally raw) data to

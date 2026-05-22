@@ -13,7 +13,7 @@ Replace the monolithic ~1,200 LOC `SciencePipeline` worker class in `omotion/Mot
 
 **Goals:**
 
-- **Readable by scientists and FDA auditors.** Each science step is a single file; the math is at the top; the pipeline list is the algorithm.
+- **Readable by scientists and auditors.** Each science step is a single file; the math is at the top; the pipeline list is the algorithm.
 - **Composable + extensible.** Adding a correction or swapping an estimator is local to one file.
 - **Numpy-vectorized.** Per-camera Python loops become numpy operations on `(N, 2, 8)` arrays. Estimated 20-50× speedup on `MomentsStage` alone.
 - **Single coherent dataflow.** Live, raw, rolling-averaged, and corrected outputs flow through one pipeline with explicit tee points.
@@ -23,7 +23,7 @@ Replace the monolithic ~1,200 LOC `SciencePipeline` worker class in `omotion/Mot
 
 In declining design weight:
 
-1. **FDA auditors** — must be able to read the algorithm without untangling threads, callbacks, or per-camera state dicts. The stage list is the spec.
+1. **Auditors** — must be able to read the algorithm without untangling threads, callbacks, or per-camera state dicts. The stage list is the spec.
 2. **Future contributors** — adding a correction or estimator must be local to one file, not a 6-place change.
 3. **Scientists writing analysis code on top of the SDK** — subscribe to corrected samples, replay sessions, plug in custom processing.
 4. **Code reviewers verifying the math** — open `moments.py` / `dark.py` / `shot_noise.py` and see the formulas at the top of the file.
@@ -529,7 +529,7 @@ Three layers:
 
 1. **Unit tests per stage.** `tests/test_pipeline/test_moments_stage.py`, `test_dark_correction_stage.py`, etc. Each tests one stage in isolation against synthetic `FrameBatch` inputs. Cross-checks against scalar reference implementations of the math. Properties asserted: variance ≥ 0 after clamp; contrast = std/mean; pedestal subtraction is invertible; field ownership respected.
 
-2. **Golden replay tests.** A handful of recorded raw CSVs from past scans, checked into `tests/data/`, each paired with the expected corrected CSV. Test: run the pipeline on the raw CSV, assert output equals the golden corrected CSV byte-for-byte. These are the FDA acceptance evidence — every science change is validated against known-good outputs.
+2. **Golden replay tests.** A handful of recorded raw CSVs from past scans, checked into `tests/data/`, each paired with the expected corrected CSV. Test: run the pipeline on the raw CSV, assert output equals the golden corrected CSV byte-for-byte. These are the acceptance evidence for audits — every science change is validated against known-good outputs.
 
 3. **End-to-end determinism tests.** Same raw source through the pipeline twice = byte-identical output. Catches accidental non-determinism (clock reads, random sampling, etc.).
 

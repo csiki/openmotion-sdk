@@ -25,6 +25,8 @@ def test_appends_warning_when_u1_exceeds_pedestal_plus_threshold():
     assert w.side == "left"
     assert w.cam_id == 3
     assert w.u1 == 200.0
+    # threshold must be pedestal + max_above_pedestal = 64 + 30 = 94, not 30
+    assert w.threshold == 94.0
 
 
 def test_threshold_is_configurable():

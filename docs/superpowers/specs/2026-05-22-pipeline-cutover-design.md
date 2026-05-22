@@ -54,9 +54,9 @@ def start_scan(self, request: ScanRequest) -> bool: ...
 
 The 6 legacy `on_*_fn` kwargs are removed entirely. Sinks now travel **on the `ScanRequest` itself** — see §3.1.1 below.
 
-### 3.1.1 `ScanRequest` carries sinks
+### 3.1.1 `ScanRequest` carries sinks and the optional telemetry source
 
-`ScanRequest` gains a `sinks: list[Sink] = field(default_factory=list)` field. The single dataclass captures the entire "what to do with this scan" contract: scan parameters + raw-save behavior + where the output goes:
+`ScanRequest` gains `sinks` and `telemetry_source` fields. The single dataclass captures the entire "what to do with this scan" contract: scan parameters + raw-save behavior + where the output goes + whether to capture console telemetry:
 
 ```python
 @dataclass
@@ -70,6 +70,7 @@ class ScanRequest:
     rolling_avg_window:  Optional[int] = None
     batch_size_frames:   Optional[int] = None
     sinks:               list[Sink] = field(default_factory=list)
+    telemetry_source:    Optional["ConsoleTelemetrySource"] = None  # see §3.6
     # ... other scan parameters
 ```
 
@@ -137,7 +138,10 @@ def start_scan(self, request):
         metadata=meta,
     )
 
-    self._runner = ScanRunner(source=source, pipeline=pipeline, sinks=request.sinks)
+    self._runner = ScanRunner(
+        source=source, pipeline=pipeline, sinks=request.sinks,
+        telemetry_source=request.telemetry_source,
+    )
     self._scan_thread = threading.Thread(target=self._runner.run, daemon=True)
     self._scan_thread.start()
     return True
@@ -342,7 +346,179 @@ self._await_scan_complete()
 
 Same pattern for any other internal SDK callers (none expected beyond `CalibrationWorkflow`).
 
-### 3.6 Test-scan support (from feature/132)
+### 3.6 Telemetry channel (developer-mode `_telemetry.csv`)
+
+The legacy bloodflow-app writes a separate per-scan `<scan_id>_telemetry.csv` file in developer mode, captured by `ConsoleTelemetryPoller` at ~10 Hz. It carries PDC samples, TEC setpoint/actual, console temperature, fan speed, and safety chip status — all console-level data that's independent of the per-frame histogram stream.
+
+PR 2 brings this into the pipeline model as a separate channel so the entire scan output flows through one diagram:
+
+#### 3.6.1 New types
+
+**`TelemetryEvent`** dataclass in `omotion/pipeline/batch.py`:
+```python
+@dataclass
+class TelemetryEvent(BatchEvent):
+    timestamp_s:        float        # per-scan t=0 normalized
+    pdc_samples:        list[float]  # mA, PDC drain since last poll
+    tec_setpoint_c:     float
+    tec_actual_c:       float
+    console_temp_c:     float
+    fan_rpm:            int
+    safety_status:      int
+    # ... full surface determined at implementation time from MotionConsole's APIs
+```
+
+**`ConsoleTelemetrySource`** in `omotion/pipeline/sources.py` — a Source-shaped iterator that wraps the existing `ConsoleTelemetryPoller`:
+```python
+class ConsoleTelemetrySource:
+    """Polls MotionConsole at fixed cadence; yields TelemetryEvents with
+    scan-relative timestamps. Parallel input to ScanRunner; doesn't
+    produce FrameBatch, doesn't go through the pipeline stages.
+    """
+    def __init__(self, *, console: "MotionConsole", poll_interval_s: float = 0.1):
+        self._console = console
+        self._poll_interval_s = poll_interval_s
+        self._stop = threading.Event()
+        self._t0: float | None = None
+
+    def __iter__(self) -> Iterator[TelemetryEvent]:
+        while not self._stop.is_set():
+            snapshot = self._console.poll_telemetry(timeout=self._poll_interval_s)
+            if snapshot is None:
+                continue
+            if self._t0 is None:
+                self._t0 = snapshot.absolute_t
+            yield TelemetryEvent(
+                timestamp_s=snapshot.absolute_t - self._t0,
+                pdc_samples=snapshot.pdc,
+                tec_setpoint_c=snapshot.tec_setpoint,
+                tec_actual_c=snapshot.tec_actual,
+                console_temp_c=snapshot.console_temp,
+                fan_rpm=snapshot.fan_rpm,
+                safety_status=snapshot.safety_status,
+            )
+
+    def close(self) -> None:
+        self._stop.set()
+```
+
+**`TelemetrySink`** in `omotion/pipeline/sinks.py`:
+```python
+class TelemetrySink:
+    """Subscribes to the 'telemetry' channel; writes events to a CSV.
+    Apps compose conditionally on developer_mode.
+    """
+    channels = {"telemetry"}
+
+    def __init__(self, output_path: str):
+        self._output_path = output_path
+        self._fh = None
+        self._writer: Any = None
+
+    def on_scan_start(self, meta):
+        self._fh = open(self._output_path, "w", newline="")
+        self._writer = csv.writer(self._fh)
+        self._writer.writerow([
+            "timestamp_s", "pdc_samples_ma", "tec_setpoint_c",
+            "tec_actual_c", "console_temp_c", "fan_rpm", "safety_status",
+        ])
+
+    def consume(self, channel, event: TelemetryEvent):
+        if channel != "telemetry":
+            return
+        self._writer.writerow([
+            f"{event.timestamp_s:.4f}",
+            ";".join(f"{s:.3f}" for s in event.pdc_samples),
+            event.tec_setpoint_c, event.tec_actual_c,
+            event.console_temp_c, event.fan_rpm, event.safety_status,
+        ])
+
+    def on_complete(self):
+        if self._fh:
+            self._fh.flush()
+            self._fh.close()
+```
+
+#### 3.6.2 ScanRunner gains a parallel telemetry thread
+
+```python
+class ScanRunner:
+    def __init__(self, *, source, pipeline, sinks, telemetry_source=None):
+        self.source = source
+        self.pipeline = pipeline
+        self.sinks = list(sinks)
+        self.telemetry_source = telemetry_source
+        self._telemetry_thread: threading.Thread | None = None
+
+    def run(self) -> None:
+        for sink in self.sinks: sink.on_scan_start(self.source.metadata)
+
+        if self.telemetry_source is not None:
+            self._telemetry_thread = threading.Thread(
+                target=self._telemetry_loop, daemon=True,
+                name="ScanRunner-telemetry",
+            )
+            self._telemetry_thread.start()
+
+        try:
+            for batch in self.source:
+                # ... existing pipeline.process + dispatch loop ...
+                pass
+        finally:
+            if self.telemetry_source is not None:
+                self.telemetry_source.close()
+                if self._telemetry_thread:
+                    self._telemetry_thread.join(timeout=2.0)
+            for sink in self.sinks: sink.on_complete()
+
+    def _telemetry_loop(self) -> None:
+        for event in self.telemetry_source:
+            for sink in self._sinks_for("telemetry"):
+                self._safe_consume(sink, "telemetry", event)
+```
+
+Same `_safe_consume` exception isolation as the main dispatch path.
+
+#### 3.6.3 App composition (gated on developer_mode)
+
+```python
+# In bloodflow-app motion_connector.py:
+sinks = [
+    _LivePlotSink(connector=self),
+    _ContactQualityCheckSink(connector=self),
+    CsvSink(output_dir=app_config.data_directory),
+]
+if app_config.scan_db_enabled:
+    sinks.append(ScanDBSink(db_path=app_config.scan_db_path))
+
+telemetry_source = None
+if app_config.developer_mode:
+    telemetry_source = ConsoleTelemetrySource(
+        console=self._interface.console,
+        poll_interval_s=0.1,
+    )
+    sinks.append(TelemetrySink(output_path=os.path.join(
+        app_config.data_directory, f"{scan_id}_telemetry.csv",
+    )))
+
+request = ScanRequest(
+    subject_id="...", duration_sec=300, ...,
+    raw_save_max_duration_s=raw_max,
+    sinks=sinks,
+    telemetry_source=telemetry_source,
+)
+self._interface.start_scan(request)
+```
+
+The construction gate sits at the app: only build `ConsoleTelemetrySource` when developer mode is on. That way the underlying poller isn't running in production scans where nobody consumes the events.
+
+#### 3.6.4 Why a separate source instead of folding into LiveUsbSource
+
+The telemetry stream is **not** synchronized to the histogram stream — it's polled by the SDK over UART at a different cadence and has its own packet format. Coupling them into one source would force one cadence on both. Keeping them as parallel inputs to `ScanRunner` preserves their independence; the only shared concept is per-scan t=0 normalization (each source maintains its own `_t0`).
+
+This also makes the design more general: any future second probe (IMU stream, ambient-light sensor, etc.) can follow the same pattern as another parallel source on `ScanRequest`.
+
+### 3.7 Test-scan support (from feature/132)
 
 `CalibrationWorkflow.start_test_scan()` (added in PR #53 on `next`) uses the same callback machinery. Migrate the same way — replace its `on_corrected_batch_fn=...` with a collector sink.
 

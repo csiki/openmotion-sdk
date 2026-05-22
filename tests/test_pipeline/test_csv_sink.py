@@ -9,12 +9,12 @@ from omotion.pipeline.sinks import CsvSink, ScanMetadata, _NORMAL_HEADERS, _REDU
 from omotion.pipeline.stages.dark import EnrichedCorrectedInterval, EnrichedCorrectedFrame
 
 
-def _meta_with_raw(write_raw, duration):
+def _meta_simple():
+    """Simple ScanMetadata for testing — no raw CSV gate fields."""
     return ScanMetadata(
         scan_id="abc", subject_id="subj", operator="op",
         started_at_iso="2026-05-22T00:00:00Z", duration_sec=300,
         left_camera_mask=0x01, right_camera_mask=0, reduced_mode=False,
-        write_raw_csv=write_raw, raw_csv_duration_sec=duration,
     )
 
 
@@ -35,18 +35,20 @@ def _dummy_raw_batch():
     )
 
 
-def test_csv_sink_skips_raw_when_write_raw_csv_is_false(tmp_path):
+def test_csv_sink_always_writes_raw_when_consume_called(tmp_path):
+    """Sink always writes raw when consume('raw', ...) is called (gating is upstream at Tee)."""
     sink = CsvSink(output_dir=tmp_path)
-    sink.on_scan_start(_meta_with_raw(write_raw=False, duration=None))
+    sink.on_scan_start(_meta_simple())
     sink.consume("raw", _dummy_raw_batch())
     sink.on_complete()
     raw_files = list(tmp_path.glob("*raw*.csv"))
-    assert raw_files == []
+    assert len(raw_files) >= 1
 
 
-def test_csv_sink_writes_type_column_when_raw_enabled(tmp_path):
+def test_csv_sink_writes_type_column_in_raw(tmp_path):
+    """Raw CSV output includes the 'type' column at index 3."""
     sink = CsvSink(output_dir=tmp_path)
-    sink.on_scan_start(_meta_with_raw(write_raw=True, duration=None))
+    sink.on_scan_start(_meta_simple())
     sink.consume("raw", _dummy_raw_batch())
     sink.on_complete()
     raw_files = list(tmp_path.glob("*raw*.csv"))
@@ -57,31 +59,13 @@ def test_csv_sink_writes_type_column_when_raw_enabled(tmp_path):
     assert header.index("type") == 3
 
 
-def test_csv_sink_raw_duration_cap_stops_writes(tmp_path):
-    """Frames with timestamp_s > raw_csv_duration_sec should not be written."""
+def test_csv_sink_raw_always_writes_data_rows(tmp_path):
+    """Raw CSV sink always writes rows when consume('raw', ...) is called.
+    Duration gating happens upstream at the Tee layer, not in the sink."""
     sink = CsvSink(output_dir=tmp_path)
-    sink.on_scan_start(_meta_with_raw(write_raw=True, duration=0.10))
+    sink.on_scan_start(_meta_simple())
 
-    # batch within cap
-    early = _dummy_raw_batch()  # timestamp_s = 0.25 — EXCEEDS 0.10
-    sink.consume("raw", early)
-    sink.on_complete()
-
-    raw_files = list(tmp_path.glob("*raw*.csv"))
-    # File may exist (was opened) but should have no data rows
-    if raw_files:
-        with open(raw_files[0]) as fh:
-            rows = list(csv.reader(fh))
-        # Only the header row, no data
-        assert len(rows) <= 1
-
-
-def test_csv_sink_raw_writes_data_rows_within_cap(tmp_path):
-    """A batch within the duration cap should write data rows."""
-    sink = CsvSink(output_dir=tmp_path)
-    sink.on_scan_start(_meta_with_raw(write_raw=True, duration=10.0))
-
-    batch = _dummy_raw_batch()  # timestamp_s = 0.25 — within 10s cap
+    batch = _dummy_raw_batch()  # timestamp_s = 0.25
     sink.consume("raw", batch)
     sink.on_complete()
 
@@ -122,7 +106,6 @@ def _meta_normal():
         left_camera_mask=0x01,   # cam 0 only
         right_camera_mask=0,
         reduced_mode=False,
-        write_raw_csv=False, raw_csv_duration_sec=None,
     )
 
 
@@ -133,7 +116,6 @@ def _meta_reduced():
         left_camera_mask=0x01,
         right_camera_mask=0,
         reduced_mode=True,
-        write_raw_csv=False, raw_csv_duration_sec=None,
     )
 
 
@@ -200,7 +182,6 @@ def test_corrected_csv_normal_mode_right_side_cam3(tmp_path):
         left_camera_mask=0,
         right_camera_mask=0x04,  # cam 2 only
         reduced_mode=False,
-        write_raw_csv=False, raw_csv_duration_sec=None,
     )
     sink = CsvSink(output_dir=tmp_path)
     sink.on_scan_start(meta)
@@ -248,7 +229,6 @@ def test_csv_sink_flushes_row_when_all_expected_cams_contribute_including_nan(tm
         left_camera_mask=0x03,  # cams 0 and 1
         right_camera_mask=0,
         reduced_mode=False,
-        write_raw_csv=False, raw_csv_duration_sec=None,
     )
 
     sink = CsvSink(output_dir=tmp_path)
@@ -315,7 +295,6 @@ def test_csv_sink_partial_row_flushed_on_complete(tmp_path):
         left_camera_mask=0x03,  # cams 0 and 1
         right_camera_mask=0,
         reduced_mode=False,
-        write_raw_csv=False, raw_csv_duration_sec=None,
     )
 
     sink = CsvSink(output_dir=tmp_path)

@@ -18,17 +18,17 @@ logger = logging.getLogger("omotion.pipeline.sinks")
 
 @dataclass(frozen=True)
 class ScanMetadata:
-    """Per-scan metadata handed to every sink at on_scan_start."""
-    scan_id:               str
-    subject_id:            str
-    operator:              str
-    started_at_iso:        str
-    duration_sec:          int
-    left_camera_mask:      int
-    right_camera_mask:     int
-    reduced_mode:          bool
-    write_raw_csv:         bool
-    raw_csv_duration_sec:  Optional[float]
+    """Per-scan metadata handed to every sink at on_scan_start.
+    Output gating lives elsewhere (raw-save gate is on the pipeline's
+    Tee("raw"); default storage sinks are SDK-injected at start_scan)."""
+    scan_id:           str
+    subject_id:        str
+    operator:          str
+    started_at_iso:    str
+    duration_sec:      int
+    left_camera_mask:  int
+    right_camera_mask: int
+    reduced_mode:      bool
 
 
 @runtime_checkable
@@ -189,7 +189,7 @@ class CsvSink:
     def _consume_raw(self, batch) -> None:
         """Write raw histogram rows for each frame in the batch."""
         meta = self._meta
-        if meta is None or not meta.write_raw_csv:
+        if meta is None:
             return
 
         import numpy as np
@@ -200,10 +200,6 @@ class CsvSink:
             cam_id = int(batch.cam_ids[i])
             frame_id = int(batch.frame_ids[i])
             ts = float(batch.timestamp_s[i])
-
-            # Duration cap: skip this frame if it's past the limit
-            if meta.raw_csv_duration_sec is not None and ts > meta.raw_csv_duration_sec:
-                continue
 
             frame_type = ""
             if batch.frame_type is not None:
@@ -496,7 +492,7 @@ class ScanDBSink:
 
     def _consume_raw(self, batch) -> None:
         meta = self._meta
-        if meta is None or not meta.write_raw_csv:
+        if meta is None:
             return
         if self._db is None or self._session_id is None:
             return

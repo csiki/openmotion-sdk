@@ -18,7 +18,7 @@ from typing import Any, Iterator, Optional, Protocol, runtime_checkable
 
 import numpy as np
 
-from .batch import FrameBatch
+from .batch import FrameBatch, TelemetryEvent
 from .sinks import ScanMetadata
 
 
@@ -246,3 +246,39 @@ class LiveUsbSource(_BaseSource):
         raise NotImplementedError(
             "LiveUsbSource reader loop — wired up in PR 2 against omotion.StreamInterface."
         )
+
+
+class ConsoleTelemetrySource:
+    """Polls MotionConsole at fixed cadence; yields TelemetryEvent with
+    scan-relative timestamps.
+
+    Used as the optional `telemetry_source` on ScanRunner. Doesn't produce
+    FrameBatch — parallel input that flows to "telemetry"-channel sinks
+    and feeds the pipeline's TelemetryAggregator.
+    """
+
+    def __init__(self, *, console, poll_interval_s: float = 0.1):
+        self._console = console
+        self._poll_interval_s = poll_interval_s
+        self._stop = threading.Event()
+        self._t0 = None
+
+    def __iter__(self):
+        while not self._stop.is_set():
+            snap = self._console.poll_telemetry(timeout=self._poll_interval_s)
+            if snap is None:
+                continue
+            if self._t0 is None:
+                self._t0 = snap.absolute_t
+            yield TelemetryEvent(
+                timestamp_s=snap.absolute_t - self._t0,
+                pdc_samples=list(snap.pdc),
+                tec_setpoint_c=snap.tec_setpoint,
+                tec_actual_c=snap.tec_actual,
+                console_temp_c=snap.console_temp,
+                fan_rpm=snap.fan_rpm,
+                safety_status=snap.safety_status,
+            )
+
+    def close(self) -> None:
+        self._stop.set()

@@ -231,3 +231,119 @@ def test_corrected_csv_reduced_mode_populates_left_columns(tmp_path):
     data = rows[1]
     assert float(data[header.index("bfi_left")]) == pytest.approx(7.5)
     assert float(data[header.index("bvi_left")]) == pytest.approx(8.0)
+
+
+def test_csv_sink_flushes_row_when_all_expected_cams_contribute_including_nan(tmp_path):
+    """Row must flush when all expected cameras have contributed, even if some
+    values (bfi, bvi) are NaN.  The completion check uses the 'mean' column
+    presence, not whether values are finite.
+
+    Scenario: 2 expected cams (cam0 left, cam1 left).
+    cam0 contributes normal values; cam1 contributes with mean=0 which still
+    counts as 'contributed' (non-empty string).  Both rows should flush.
+    """
+    meta = ScanMetadata(
+        scan_id="nan_test", subject_id="s", operator="op",
+        started_at_iso="2026-05-22T00:00:00Z", duration_sec=60,
+        left_camera_mask=0x03,  # cams 0 and 1
+        right_camera_mask=0,
+        reduced_mode=False,
+        write_raw_csv=False, raw_csv_duration_sec=None,
+    )
+
+    sink = CsvSink(output_dir=tmp_path)
+    sink.on_scan_start(meta)
+
+    abs_id = 42
+
+    # cam0: normal values
+    f0 = EnrichedCorrectedFrame(
+        abs_frame_id=abs_id, t=1.05,
+        side="left", cam_id=0,
+        mean=200.0, std=5.0, contrast=0.025,
+        bfi=8.0, bvi=7.5,
+    )
+    iv0 = EnrichedCorrectedInterval(left_abs=0, right_abs=100, frames=[f0])
+    sink.consume("final", iv0)
+
+    # Row should NOT flush yet (cam1 hasn't contributed)
+    assert abs_id in sink._corrected_acc, (
+        "Accumulator should still hold the partial row"
+    )
+
+    # cam1: mean=0.0 (zero is still a valid contribution, not empty)
+    f1 = EnrichedCorrectedFrame(
+        abs_frame_id=abs_id, t=1.05,
+        side="left", cam_id=1,
+        mean=0.0, std=0.0, contrast=0.0,
+        bfi=0.0, bvi=0.0,
+    )
+    iv1 = EnrichedCorrectedInterval(left_abs=0, right_abs=100, frames=[f1])
+    sink.consume("final", iv1)
+
+    # Now all expected cams have contributed — row should have flushed
+    assert abs_id not in sink._corrected_acc, (
+        "Row should have been flushed once all expected cams contributed"
+    )
+
+    sink.on_complete()
+
+    files = list(tmp_path.glob("*corrected*.csv"))
+    assert len(files) == 1
+    with open(files[0]) as fh:
+        rows = list(csv.reader(fh))
+    # 1 header + 1 data row
+    assert len(rows) == 2, f"Expected 1 data row, got {len(rows) - 1}"
+    header = rows[0]
+    data = rows[1]
+    # cam0 values
+    assert float(data[header.index("mean_l1")]) == pytest.approx(200.0)
+    assert float(data[header.index("bfi_l1")]) == pytest.approx(8.0)
+    # cam1 values (zero)
+    assert float(data[header.index("mean_l2")]) == pytest.approx(0.0)
+
+
+def test_csv_sink_partial_row_flushed_on_complete(tmp_path):
+    """on_complete flushes any partial rows (not all cams contributed).
+
+    Scenario: 2 expected cams, only 1 contributes. on_complete should
+    flush the partial row anyway.
+    """
+    meta = ScanMetadata(
+        scan_id="partial_test", subject_id="s", operator="op",
+        started_at_iso="2026-05-22T00:00:00Z", duration_sec=60,
+        left_camera_mask=0x03,  # cams 0 and 1
+        right_camera_mask=0,
+        reduced_mode=False,
+        write_raw_csv=False, raw_csv_duration_sec=None,
+    )
+
+    sink = CsvSink(output_dir=tmp_path)
+    sink.on_scan_start(meta)
+
+    abs_id = 55
+    f0 = EnrichedCorrectedFrame(
+        abs_frame_id=abs_id, t=1.375,
+        side="left", cam_id=0,
+        mean=150.0, std=4.0, contrast=0.027,
+        bfi=7.8, bvi=6.5,
+    )
+    iv = EnrichedCorrectedInterval(left_abs=0, right_abs=100, frames=[f0])
+    sink.consume("final", iv)
+
+    # Only 1 of 2 expected cams — row should NOT flush yet
+    assert abs_id in sink._corrected_acc
+
+    sink.on_complete()
+
+    files = list(tmp_path.glob("*corrected*.csv"))
+    assert len(files) == 1
+    with open(files[0]) as fh:
+        rows = list(csv.reader(fh))
+    # Should still emit the partial row via on_complete flush
+    assert len(rows) == 2, f"Expected 1 data row from partial flush, got {len(rows) - 1}"
+    header = rows[0]
+    data = rows[1]
+    assert float(data[header.index("mean_l1")]) == pytest.approx(150.0)
+    # cam1 (not contributed) should be empty
+    assert data[header.index("mean_l2")] == ""

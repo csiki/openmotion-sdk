@@ -76,6 +76,14 @@ class CommInterface(USBInterfaceBase):
         super().__init__(dev, interface_index, desc)
         self.read_thread = None
         self.stop_event = threading.Event()
+        # Set by the read loop when it exits on a fatal USB error
+        # (ENODEV / EIO / EPIPE / other non-timeout failures). send_packet
+        # polls it inside the wait loops so an in-flight command unblocks
+        # the moment the transport drops, instead of spinning for the full
+        # caller-supplied timeout (60 s for program_fpga, etc.). See
+        # bloodflow-app#130: power-cycle mid-configure left the SDK's
+        # configure worker hung for 60 s, blocking the next scan attempt.
+        self._transport_down_evt = threading.Event()
         # Contiguous byte buffer: USB reader extends the end, packet parser chops from the front
         self._read_buffer = bytearray()
         self._buffer_lock = threading.Lock()
@@ -160,6 +168,11 @@ class CommInterface(USBInterfaceBase):
                 data = bytearray()
                 with self._io_lock:
                     while time.monotonic() - start < timeout:
+                        if self._transport_down_evt.is_set():
+                            raise ConnectionError(
+                                f"{self.desc}: transport down, packet id "
+                                f"0x{id:04X} not deliverable"
+                            )
                         try:
                             resp = self.receive()
                             time.sleep(0.005)
@@ -173,6 +186,11 @@ class CommInterface(USBInterfaceBase):
             else:
                 start_time = time.monotonic()
                 while time.monotonic() - start_time < timeout:
+                    if self._transport_down_evt.is_set():
+                        raise ConnectionError(
+                            f"{self.desc}: transport down, packet id "
+                            f"0x{id:04X} not deliverable"
+                        )
                     if self.response_queue.empty():
                         time.sleep(0.0005)
                     else:
@@ -235,6 +253,10 @@ class CommInterface(USBInterfaceBase):
             logger.info(f"{self.desc}: Read thread already running")
             return
         self.stop_event.clear()
+        # Fresh read thread implies transport is up again; any prior
+        # transport-down latch from a previous USB error must clear or
+        # subsequent sends would short-circuit on the stale flag.
+        self._transport_down_evt.clear()
         self.read_thread = threading.Thread(target=self._read_loop, daemon=True)
         self.read_thread.start()
         logger.info(f"{self.desc}: Read thread started")
@@ -297,6 +319,10 @@ class CommInterface(USBInterfaceBase):
                 logger.warning(
                     f"{self.desc}: USB read error (errno={e.errno}); exiting read loop: {e}"
                 )
+                # Latch transport-down BEFORE the io-error callback so any
+                # send_packet that is currently spinning in its wait loop
+                # observes the dead transport on its next tick.
+                self._transport_down_evt.set()
                 self._notify_io_error(e)
                 break
 

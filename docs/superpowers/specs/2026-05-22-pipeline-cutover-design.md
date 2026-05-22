@@ -347,7 +347,7 @@ class LiveUsbSource(_BaseSource):
 
 Two reader threads (one per side) push parsed samples into a shared `_batch_queue`; the iterator yields from that.
 
-**ConsoleTelemetry integration:** an optional `ConsoleTelemetryPoller` runs in the background polling PDC/TEC at 10 Hz. The `LiveUsbSource` exposes a small `update_telemetry(tcm, tcl, pdc)` callback; the poller calls it. When building the next batch, the source attaches the most recent telemetry values to each frame's `pdc`/`tcm`/`tcl` fields.
+**Telemetry integration:** `LiveUsbSource` is now pure histogram. Per-frame `batch.pdc/tcm/tcl` fields are populated downstream by `TelemetryIngestStage` from the `TelemetryAggregator`, not by the source. See §3.6.5 for the full telemetry-correction scaffolding.
 
 ### 3.4 `MotionProcessing.py` becomes a shim
 
@@ -579,6 +579,56 @@ When no `TelemetrySink` is in the request, no source runs — no USB chatter, no
 The telemetry stream is **not** synchronized to the histogram stream — it's polled by the SDK over UART at a different cadence and has its own packet format. Coupling them into one source would force one cadence on both. Keeping them as parallel inputs to `ScanRunner` preserves their independence; the only shared concept is per-scan t=0 normalization (each source maintains its own `_t0`).
 
 This generalizes for future probes: when an IMU source or ambient-light source lands, it follows the same pattern. The IMU source's sink subscribes to `"imu"`; `ScanWorkflow.start_scan` detects the channel and auto-wires the source. No changes to `ScanRequest`'s public shape.
+
+#### 3.6.5 Telemetry-based correction (future) — scaffolding only
+
+We anticipate a future where pipeline stages will need to correct BFI/BVI based on device telemetry (laser PDC drift, sensor temperature, etc.). PR 2 adds the minimum scaffolding so this can land cleanly later, without implementing any correction stage today.
+
+**Three small pieces:**
+
+1. **`TelemetryAggregator`** — thread-safe ring buffer of recent `TelemetryEvent` (default capacity 100 ≈ 10 s at 10 Hz). Exposes `snapshot_at(t: float) -> Optional[TelemetryEvent]` for stages to query the most recent telemetry at a given frame timestamp. Lives in `omotion/pipeline/telemetry.py`.
+
+2. **`TelemetryIngestStage`** — early pipeline stage (positioned after `FrameClassificationStage`) that reads from the aggregator and populates `batch.pdc / batch.tcm / batch.tcl` for each frame in the batch. This is the bridge between the per-snapshot world (TelemetryEvent on the channel) and the per-frame world (FrameBatch fields the CsvSink raw writer expects). When no aggregator is present (telemetry source not running), the stage is a no-op and the per-frame fields stay `None`.
+
+3. **`Pipeline.telemetry_aggregator: TelemetryAggregator | None`** — optional attribute on the Pipeline. `default_pipeline()` factory constructs one and assigns it; the factory also adds the `TelemetryIngestStage` to the stage list. Future correction stages take `aggregator` as a constructor arg.
+
+**ScanRunner wires events to the aggregator inside `_telemetry_loop`:**
+
+```python
+def _telemetry_loop(self):
+    for event in self.telemetry_source:
+        if self.pipeline.telemetry_aggregator is not None:
+            self.pipeline.telemetry_aggregator.update(event)
+        for sink in self._sinks_for("telemetry"):
+            self._safe_consume(sink, "telemetry", event)
+```
+
+One extra line in the runner. Free at runtime if no aggregator is present.
+
+**LiveUsbSource simplification:** the earlier text in §3.3 mentioned LiveUsbSource pumping telemetry into FrameBatch via a poller hook. **Drop that.** With `TelemetryIngestStage` in the pipeline, LiveUsbSource is now pure histogram — it leaves `batch.pdc/tcm/tcl` as `None`, and the stage fills them downstream from the aggregator. One responsibility per piece.
+
+**When a future correction stage lands** (e.g., `PdcCorrectionStage`):
+
+```python
+class PdcCorrectionStage:
+    name = "pdc_correction"
+    def __init__(self, *, aggregator: TelemetryAggregator):
+        self._aggregator = aggregator
+
+    def process(self, batch):
+        for i in range(batch.bfi_live.shape[0]):
+            event = self._aggregator.snapshot_at(batch.timestamp_s[i])
+            if event is not None:
+                # Apply PDC-based correction using event.pdc_samples
+                ...
+        return batch
+
+    def reset(self): pass
+```
+
+`default_pipeline()` constructs it with `aggregator=pipeline.telemetry_aggregator` and inserts it at the right point in the stage list. No plumbing changes elsewhere. The aggregator is just a dependency passed in via constructor.
+
+**What we are NOT designing today:** which corrections to apply, how to scale BFI/std from PDC drift, whether to invalidate frames during safety-chip errors, etc. That's a separate design when the science is ready.
 
 ### 3.8 ContactQualityWorkflow — moves CQ from app to SDK
 

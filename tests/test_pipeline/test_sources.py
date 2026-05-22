@@ -8,7 +8,7 @@ import time
 import numpy as np
 import pytest
 
-from omotion.pipeline.sources import Source, _BaseSource, CsvReplaySource
+from omotion.pipeline.sources import Source, _BaseSource, CsvReplaySource, DbReplaySource
 from omotion.pipeline.sinks import ScanMetadata
 
 
@@ -107,3 +107,65 @@ def test_csv_replay_splits_into_multiple_batches(tmp_path):
     assert len(batches) == 2
     assert len(batches[0].frame_ids) == 3
     assert len(batches[1].frame_ids) == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 21: DbReplaySource
+# ---------------------------------------------------------------------------
+
+def test_db_replay_yields_batches_from_session_raw(tmp_path):
+    """Use the actual ScanDatabase API (create_session + insert_raw_frame)."""
+    from omotion.ScanDatabase import ScanDatabase
+
+    db_path = tmp_path / "scan.db"
+    db = ScanDatabase(str(db_path))
+
+    session_id = db.create_session(
+        session_label="test-session",
+        session_start=time.time(),
+    )
+
+    # insert_raw_frame uses: hist (bytes), temp, sum_counts
+    bins = bytes(1024 * 4)  # 4096 bytes of zeros
+    for fid in range(1, 4):
+        db.insert_raw_frame(
+            session_id=session_id,
+            side="left",
+            cam_id=0,
+            frame_id=fid,
+            timestamp_s=fid * 0.025,
+            hist=bins,
+            temp=27.0,
+            sum_counts=2_457_606,
+        )
+    db.close()
+
+    src = DbReplaySource(
+        db_path=str(db_path),
+        session_id=session_id,
+        batch_size_frames=10,
+        metadata=_meta(),
+    )
+    batches = list(src)
+    assert len(batches) >= 1
+    assert batches[0].frame_ids.tolist() == [1, 2, 3]
+
+
+def test_db_replay_empty_session_yields_nothing(tmp_path):
+    from omotion.ScanDatabase import ScanDatabase
+
+    db_path = tmp_path / "empty.db"
+    db = ScanDatabase(str(db_path))
+    session_id = db.create_session(
+        session_label="empty-session",
+        session_start=time.time(),
+    )
+    db.close()
+
+    src = DbReplaySource(
+        db_path=str(db_path),
+        session_id=session_id,
+        batch_size_frames=10,
+        metadata=_meta(),
+    )
+    assert list(src) == []

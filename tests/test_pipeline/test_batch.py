@@ -33,6 +33,28 @@ def test_framebatch_events_list_is_mutable():
     assert isinstance(batch.events[0], IntervalClosed)
 
 
+def test_telemetry_event_carries_console_telemetry_fields():
+    from omotion.pipeline.batch import TelemetryEvent
+    ev = TelemetryEvent(
+        timestamp_s=12.5, pdc_samples=[1.23, 1.24, 1.22],
+        tec_setpoint_c=25.0, tec_actual_c=25.1, console_temp_c=37.4,
+        fan_rpm=2400, safety_status=0,
+    )
+    assert ev.timestamp_s == 12.5
+    assert ev.pdc_samples == [1.23, 1.24, 1.22]
+    assert ev.tec_setpoint_c == 25.0
+    assert ev.fan_rpm == 2400
+
+
+def test_telemetry_event_is_a_batch_event():
+    from omotion.pipeline.batch import TelemetryEvent, BatchEvent
+    ev = TelemetryEvent(
+        timestamp_s=0.0, pdc_samples=[], tec_setpoint_c=0.0,
+        tec_actual_c=0.0, console_temp_c=0.0, fan_rpm=0, safety_status=0,
+    )
+    assert isinstance(ev, BatchEvent)
+
+
 def _trivial_batch(n: int) -> FrameBatch:
     return FrameBatch(
         cam_ids=np.zeros(n, dtype=np.int8),

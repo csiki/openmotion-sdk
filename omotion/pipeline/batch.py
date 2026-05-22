@@ -64,6 +64,20 @@ class StencilFallback(BatchEvent):
 
 
 @dataclass
+class TelemetryEvent(BatchEvent):
+    """One snapshot of console-level telemetry. Yielded by ConsoleTelemetrySource
+    at ~10 Hz; dispatched to "telemetry" sinks and also ingested into the pipeline's
+    TelemetryAggregator for future per-frame correction stages."""
+    timestamp_s:    float
+    pdc_samples:    list
+    tec_setpoint_c: float
+    tec_actual_c:   float
+    console_temp_c: float
+    fan_rpm:        int
+    safety_status:  int
+
+
+@dataclass
 class FrameBatch:
     """N frames worth of data, two sides, 8 cameras each.
 

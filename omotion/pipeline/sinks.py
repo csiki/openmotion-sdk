@@ -78,21 +78,29 @@ class CsvSink:
 
     channels = {"raw", "final"}
 
+    # Corrected CSV header: one row per CorrectedFrame
+    _CORRECTED_HEADERS = ["abs_frame_id", "timestamp_s", "mean", "std"]
+
     def __init__(self, output_dir) -> None:
         self._output_dir = str(output_dir)
         self._meta: Optional[ScanMetadata] = None
         self._raw_fhs: dict[str, Any] = {}    # side -> file handle
         self._raw_csvs: dict[str, Any] = {}   # side -> csv.writer
+        self._corrected_fh: Optional[Any] = None
+        self._corrected_csv: Optional[Any] = None
         self._closed = False
 
     def on_scan_start(self, meta: ScanMetadata) -> None:
         self._meta = meta
         self._closed = False
+        self._corrected_fh = None
+        self._corrected_csv = None
 
     def consume(self, channel: str, payload: Any) -> None:
         if channel == "raw":
             self._consume_raw(payload)
-        # "final" channel: no-op placeholder until PR 3 wires corrected output
+        elif channel == "final":
+            self._consume_final(payload)
 
     def on_complete(self) -> None:
         if self._closed:
@@ -106,6 +114,14 @@ class CsvSink:
                 logger.exception("CsvSink: failed to close %s raw CSV", side)
         self._raw_fhs.clear()
         self._raw_csvs.clear()
+        if self._corrected_fh is not None:
+            try:
+                self._corrected_fh.flush()
+                self._corrected_fh.close()
+            except Exception:
+                logger.exception("CsvSink: failed to close corrected CSV")
+            self._corrected_fh = None
+            self._corrected_csv = None
 
     # ------------------------------------------------------------------
     # Internal
@@ -169,6 +185,41 @@ class CsvSink:
                     pdc_val,
                 ])
 
+    def _consume_final(self, interval) -> None:
+        """Write each CorrectedFrame from a CorrectedInterval to the corrected CSV."""
+        w = self._get_or_open_corrected_writer()
+        if w is None:
+            return
+        for frame in interval.frames:
+            w.writerow([
+                frame.abs_frame_id,
+                round(frame.t, 9),
+                round(float(frame.mean), 9),
+                round(float(frame.std), 9),
+            ])
+        if self._corrected_fh is not None:
+            self._corrected_fh.flush()
+
+    def _get_or_open_corrected_writer(self):
+        if self._corrected_csv is not None:
+            return self._corrected_csv
+        meta = self._meta
+        if meta is None:
+            return None
+        try:
+            os.makedirs(self._output_dir, exist_ok=True)
+            filename = f"{meta.scan_id}_corrected.csv"
+            path = os.path.join(self._output_dir, filename)
+            fh = open(path, "w", newline="", encoding="utf-8")
+            w = csv.writer(fh)
+            w.writerow(self._CORRECTED_HEADERS)
+            self._corrected_fh = fh
+            self._corrected_csv = w
+            return w
+        except Exception:
+            logger.exception("CsvSink: failed to open corrected CSV")
+            return None
+
     def _get_or_open_raw_writer(self, side: str, mask: int):
         if side in self._raw_csvs:
             return self._raw_csvs[side]
@@ -227,7 +278,8 @@ class ScanDBSink:
     def consume(self, channel: str, payload: Any) -> None:
         if channel == "raw":
             self._consume_raw(payload)
-        # "final" channel: placeholder until PR 3
+        elif channel == "final":
+            self._consume_final(payload)
 
     def on_complete(self) -> None:
         if self._closed:
@@ -251,6 +303,42 @@ class ScanDBSink:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _consume_final(self, interval) -> None:
+        """Write CorrectedFrames from a CorrectedInterval to session_data.
+
+        The session_data table holds: cam_id, side, frame_id, timestamp_s,
+        mean, bfi, bvi, contrast. For CorrectedFrames we don't have cam_id
+        or side metadata (they're aggregated by DarkCorrectionStage at the
+        per-camera level). We write cam_id=-1, side=0 (left sentinel) so the
+        rows are query-able; PR 3 will carry per-cam data through the interval.
+        """
+        if self._db is None or self._session_id is None:
+            return
+        rows = []
+        for frame in interval.frames:
+            mean_val = float(frame.mean)
+            std_val = float(frame.std)
+            contrast_val = (std_val / mean_val) if mean_val > 0 else None
+            rows.append({
+                "session_id": self._session_id,
+                "session_raw_id": None,
+                "cam_id": -1,
+                "side": 0,
+                "frame_id": int(frame.abs_frame_id),
+                "timestamp_s": round(frame.t, 6),
+                "mean": round(mean_val, 9),
+                "contrast": round(contrast_val, 9) if contrast_val is not None else None,
+                "bfi": None,
+                "bvi": None,
+            })
+        if rows:
+            try:
+                self._db.insert_session_data_rows(rows)
+            except Exception:
+                logger.exception(
+                    "ScanDBSink: failed to insert %d corrected frames", len(rows)
+                )
 
     def _consume_raw(self, batch) -> None:
         meta = self._meta

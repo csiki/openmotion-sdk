@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from omotion.pipeline.factory import default_pipeline
 from omotion.pipeline.runner import ScanRunner
 from omotion.pipeline.sources import CsvReplaySource
-from omotion.pipeline.sinks import CsvSink, ScanMetadata
+from omotion.pipeline.sinks import CsvSink, ScanMetadata, _NORMAL_HEADERS
 from omotion.pipeline.pedestal import SensorPedestals
 
 
@@ -131,7 +131,7 @@ def test_normal_short_scan_matches_golden(tmp_path: pathlib.Path) -> None:
 
 
 def test_corrected_csv_has_expected_header(tmp_path: pathlib.Path) -> None:
-    """Corrected CSV must start with the canonical header."""
+    """Corrected CSV must start with the 82-column legacy header."""
     raw_csv = HERE / "normal_short_scan.raw.csv"
     if not raw_csv.exists():
         pytest.skip("Raw fixture not found — run regenerate_goldens.py")
@@ -140,7 +140,9 @@ def test_corrected_csv_has_expected_header(tmp_path: pathlib.Path) -> None:
     actual_path = _run_replay(raw_csv, tmp_path, meta)
     rows = _read_csv_rows(actual_path)
 
-    assert rows[0] == ["abs_frame_id", "timestamp_s", "mean", "std"]
+    assert rows[0] == _NORMAL_HEADERS, (
+        f"Header mismatch. Got: {rows[0][:5]}..."
+    )
 
 
 def test_corrected_csv_has_data_rows(tmp_path: pathlib.Path) -> None:

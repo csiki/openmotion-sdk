@@ -3,8 +3,10 @@
 import csv
 import numpy as np
 import pytest
+from dataclasses import dataclass
 from omotion.pipeline.batch import FrameBatch
-from omotion.pipeline.sinks import CsvSink, ScanMetadata
+from omotion.pipeline.sinks import CsvSink, ScanMetadata, _NORMAL_HEADERS, _REDUCED_HEADERS
+from omotion.pipeline.stages.dark import EnrichedCorrectedInterval, EnrichedCorrectedFrame
 
 
 def _meta_with_raw(write_raw, duration):
@@ -95,3 +97,137 @@ def test_csv_sink_channels_attribute():
     sink = CsvSink(output_dir=".")
     assert "raw" in sink.channels
     assert "final" in sink.channels
+
+
+# ---------------------------------------------------------------------------
+# Corrected (final) channel — wide format tests
+# ---------------------------------------------------------------------------
+
+def _make_enriched_interval(side: str = "left", cam_id: int = 0,
+                             abs_frame_id: int = 10, t: float = 0.25):
+    """Helper: one-frame EnrichedCorrectedInterval."""
+    f = EnrichedCorrectedFrame(
+        abs_frame_id=abs_frame_id, t=t,
+        side=side, cam_id=cam_id,
+        mean=100.0, std=5.0, contrast=0.05,
+        bfi=7.5, bvi=8.0,
+    )
+    return EnrichedCorrectedInterval(left_abs=0, right_abs=20, frames=[f])
+
+
+def _meta_normal():
+    return ScanMetadata(
+        scan_id="test", subject_id="s", operator="op",
+        started_at_iso="2026-05-22T00:00:00Z", duration_sec=60,
+        left_camera_mask=0x01,   # cam 0 only
+        right_camera_mask=0,
+        reduced_mode=False,
+        write_raw_csv=False, raw_csv_duration_sec=None,
+    )
+
+
+def _meta_reduced():
+    return ScanMetadata(
+        scan_id="test_red", subject_id="s", operator="op",
+        started_at_iso="2026-05-22T00:00:00Z", duration_sec=60,
+        left_camera_mask=0x01,
+        right_camera_mask=0,
+        reduced_mode=True,
+        write_raw_csv=False, raw_csv_duration_sec=None,
+    )
+
+
+def test_corrected_csv_normal_mode_header_has_82_columns(tmp_path):
+    """Normal mode corrected CSV must have exactly 82 columns matching legacy format."""
+    sink = CsvSink(output_dir=tmp_path)
+    sink.on_scan_start(_meta_normal())
+    sink.consume("final", _make_enriched_interval())
+    sink.on_complete()
+
+    files = list(tmp_path.glob("*corrected*.csv"))
+    assert len(files) == 1
+    with open(files[0]) as fh:
+        header = next(csv.reader(fh))
+    assert header == _NORMAL_HEADERS, (
+        f"Header mismatch.\nExpected: {_NORMAL_HEADERS}\nGot:      {header}"
+    )
+    assert len(header) == 82
+
+
+def test_corrected_csv_reduced_mode_header_has_6_columns(tmp_path):
+    """Reduced mode corrected CSV must have 6 columns."""
+    sink = CsvSink(output_dir=tmp_path)
+    sink.on_scan_start(_meta_reduced())
+    sink.consume("final", _make_enriched_interval())
+    sink.on_complete()
+
+    files = list(tmp_path.glob("*corrected*.csv"))
+    assert len(files) == 1
+    with open(files[0]) as fh:
+        header = next(csv.reader(fh))
+    assert header == _REDUCED_HEADERS
+    assert len(header) == 6
+
+
+def test_corrected_csv_normal_mode_places_values_in_correct_columns(tmp_path):
+    """bfi_l1 must appear in the correct column for cam_id=0 side=left."""
+    sink = CsvSink(output_dir=tmp_path)
+    sink.on_scan_start(_meta_normal())
+    # cam_id=0 -> l1; side=left
+    sink.consume("final", _make_enriched_interval(side="left", cam_id=0,
+                                                    abs_frame_id=5, t=0.1))
+    sink.on_complete()
+
+    files = list(tmp_path.glob("*corrected*.csv"))
+    with open(files[0]) as fh:
+        rows = list(csv.reader(fh))
+    assert len(rows) >= 2, "No data rows produced"
+    header = rows[0]
+    data = rows[1]
+    bfi_l1_idx = header.index("bfi_l1")
+    mean_l1_idx = header.index("mean_l1")
+    contrast_l1_idx = header.index("contrast_l1")
+    assert float(data[bfi_l1_idx]) == pytest.approx(7.5)
+    assert float(data[mean_l1_idx]) == pytest.approx(100.0)
+    assert float(data[contrast_l1_idx]) == pytest.approx(0.05)
+
+
+def test_corrected_csv_normal_mode_right_side_cam3(tmp_path):
+    """cam_id=2 side=right -> r3 columns."""
+    meta = ScanMetadata(
+        scan_id="right_test", subject_id="s", operator="op",
+        started_at_iso="2026-05-22T00:00:00Z", duration_sec=60,
+        left_camera_mask=0,
+        right_camera_mask=0x04,  # cam 2 only
+        reduced_mode=False,
+        write_raw_csv=False, raw_csv_duration_sec=None,
+    )
+    sink = CsvSink(output_dir=tmp_path)
+    sink.on_scan_start(meta)
+    sink.consume("final", _make_enriched_interval(side="right", cam_id=2,
+                                                    abs_frame_id=7, t=0.175))
+    sink.on_complete()
+
+    files = list(tmp_path.glob("*corrected*.csv"))
+    with open(files[0]) as fh:
+        rows = list(csv.reader(fh))
+    header = rows[0]
+    data = rows[1]
+    bfi_r3_idx = header.index("bfi_r3")
+    assert float(data[bfi_r3_idx]) == pytest.approx(7.5)
+
+
+def test_corrected_csv_reduced_mode_populates_left_columns(tmp_path):
+    """Reduced mode: left-side frame populates bfi_left/bvi_left columns."""
+    sink = CsvSink(output_dir=tmp_path)
+    sink.on_scan_start(_meta_reduced())
+    sink.consume("final", _make_enriched_interval(side="left", cam_id=0))
+    sink.on_complete()
+
+    files = list(tmp_path.glob("*corrected*.csv"))
+    with open(files[0]) as fh:
+        rows = list(csv.reader(fh))
+    header = rows[0]
+    data = rows[1]
+    assert float(data[header.index("bfi_left")]) == pytest.approx(7.5)
+    assert float(data[header.index("bvi_left")]) == pytest.approx(8.0)

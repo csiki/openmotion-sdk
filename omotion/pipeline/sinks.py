@@ -6,6 +6,7 @@ the protocol definitions.
 
 from __future__ import annotations
 
+import collections
 import csv
 import logging
 import os
@@ -65,21 +66,55 @@ _RAW_PIPELINE_HEADERS: list = [
 ]
 
 
+def _corrected_headers_normal() -> list[str]:
+    """82-column legacy corrected CSV header."""
+    cols = ["frame_id", "timestamp_s"]
+    for metric in ("bfi", "bvi", "mean", "contrast", "temp"):
+        for side in ("l", "r"):
+            for cam in range(1, 9):
+                cols.append(f"{metric}_{side}{cam}")
+    return cols
+
+
+def _corrected_headers_reduced() -> list[str]:
+    """6-column reduced corrected CSV header."""
+    return ["frame_id", "timestamp_s", "bfi_left", "bfi_right", "bvi_left", "bvi_right"]
+
+
+# Build the column-index lookup once at module load time.
+_NORMAL_HEADERS = _corrected_headers_normal()
+_REDUCED_HEADERS = _corrected_headers_reduced()
+
+# Maps (metric, side_char, cam_1indexed) -> column index in _NORMAL_HEADERS
+_NORMAL_COL_IDX: dict[tuple[str, str, int], int] = {
+    (metric, side, cam): _NORMAL_HEADERS.index(f"{metric}_{side}{cam}")
+    for metric in ("bfi", "bvi", "mean", "contrast", "temp")
+    for side in ("l", "r")
+    for cam in range(1, 9)
+}
+
+
 class CsvSink:
     """Channel-based CSV sink for the pipeline.
 
     Channels:
         "raw"   — per-frame raw histograms (gated by meta.write_raw_csv)
-        "final" — per-interval corrected output (placeholder; wired in PR 3)
+        "final" — per-interval corrected output
 
     Raw file naming: ``{scan_id}_{subject_id}_{side}_mask{XX}_raw.csv``
-    Files are created lazily on first "raw" consume call.
+    Corrected file naming: ``{scan_id}_corrected.csv``
+
+    Normal mode corrected CSV: 82-column wide format matching legacy SciencePipeline
+    output (frame_id, timestamp_s, bfi_l1..bfi_r8, bvi_l1..bvi_r8,
+    mean_l1..mean_r8, contrast_l1..contrast_r8, temp_l1..temp_r8).
+
+    Reduced mode corrected CSV: 6 columns (frame_id, timestamp_s,
+    bfi_left, bfi_right, bvi_left, bvi_right).
+
+    Files are created lazily on first "final" / "raw" consume call.
     """
 
     channels = {"raw", "final"}
-
-    # Corrected CSV header: one row per CorrectedFrame
-    _CORRECTED_HEADERS = ["abs_frame_id", "timestamp_s", "mean", "std"]
 
     def __init__(self, output_dir) -> None:
         self._output_dir = str(output_dir)
@@ -89,12 +124,28 @@ class CsvSink:
         self._corrected_fh: Optional[Any] = None
         self._corrected_csv: Optional[Any] = None
         self._closed = False
+        # Per-frame accumulator: abs_frame_id -> {"t": float, "row": list}
+        self._corrected_acc: "dict[int, dict]" = {}
+        self._corrected_n_cols: int = 0
+        self._corrected_reduced: bool = False
+        self._expected_cams: "dict[str, set[int]]" = {}  # side -> set of cam_ids
 
     def on_scan_start(self, meta: ScanMetadata) -> None:
         self._meta = meta
         self._closed = False
         self._corrected_fh = None
         self._corrected_csv = None
+        self._corrected_acc = {}
+        self._corrected_reduced = meta.reduced_mode
+        # Build set of expected cam_ids per side from masks
+        self._expected_cams = {
+            "left":  {c for c in range(8) if meta.left_camera_mask  & (1 << c)},
+            "right": {c for c in range(8) if meta.right_camera_mask & (1 << c)},
+        }
+        if meta.reduced_mode:
+            self._corrected_n_cols = len(_REDUCED_HEADERS)
+        else:
+            self._corrected_n_cols = len(_NORMAL_HEADERS)
 
     def consume(self, channel: str, payload: Any) -> None:
         if channel == "raw":
@@ -106,6 +157,14 @@ class CsvSink:
         if self._closed:
             return
         self._closed = True
+        # Flush any partial rows (cameras that didn't all contribute)
+        for abs_id in sorted(self._corrected_acc.keys()):
+            entry = self._corrected_acc[abs_id]
+            row = entry["row"]
+            row[0] = abs_id
+            row[1] = round(entry["t"], 9)
+            self._write_corrected_row(row)
+        self._corrected_acc.clear()
         for side, fh in list(self._raw_fhs.items()):
             try:
                 fh.flush()
@@ -186,17 +245,109 @@ class CsvSink:
                 ])
 
     def _consume_final(self, interval) -> None:
-        """Write each CorrectedFrame from a CorrectedInterval to the corrected CSV."""
+        """Accumulate EnrichedCorrectedFrames; flush complete rows to CSV."""
+        from .stages.dark import EnrichedCorrectedFrame
+        for frame in interval.frames:
+            abs_id = int(frame.abs_frame_id)
+            acc = self._corrected_acc
+            if abs_id not in acc:
+                row = [""] * self._corrected_n_cols
+                acc[abs_id] = {"t": float(frame.t), "row": row}
+            entry = acc[abs_id]
+            row = entry["row"]
+
+            if self._corrected_reduced:
+                # Reduced mode: accumulate per-side bfi/bvi, flush when we
+                # have seen contributions from both expected sides.
+                side = frame.side
+                if isinstance(frame, EnrichedCorrectedFrame):
+                    bfi_val = round(float(frame.bfi), 9)
+                    bvi_val = round(float(frame.bvi), 9)
+                else:
+                    # Fallback for plain CorrectedFrame (no enrichment)
+                    bfi_val = ""
+                    bvi_val = ""
+                if side == "left":
+                    row[2] = bfi_val
+                    row[4] = bvi_val
+                else:
+                    row[3] = bfi_val
+                    row[5] = bvi_val
+            else:
+                # Normal mode: wide per-cam columns
+                side_char = "l" if frame.side == "left" else "r"
+                cam_1 = int(frame.cam_id) % 8 + 1
+                if isinstance(frame, EnrichedCorrectedFrame):
+                    for metric, val in (
+                        ("bfi",      frame.bfi),
+                        ("bvi",      frame.bvi),
+                        ("mean",     frame.mean),
+                        ("contrast", frame.contrast),
+                    ):
+                        col_idx = _NORMAL_COL_IDX[(metric, side_char, cam_1)]
+                        row[col_idx] = round(float(val), 9)
+                else:
+                    # Fallback: only mean/std available
+                    for metric, val in (("mean", frame.mean),):
+                        col_idx = _NORMAL_COL_IDX[(metric, side_char, cam_1)]
+                        row[col_idx] = round(float(val), 9)
+                # temp: leave empty (not propagated through corrected path yet)
+
+            # Check whether this frame is complete (all expected cams seen for
+            # sides that have non-empty masks).
+            self._maybe_flush_row(abs_id)
+
+    def _maybe_flush_row(self, abs_id: int) -> None:
+        """Flush a completed accumulator row to the CSV writer."""
+        entry = self._corrected_acc.get(abs_id)
+        if entry is None:
+            return
+        row = entry["row"]
+        t = entry["t"]
+        # Determine if the row is complete enough to flush.
+        # We check that all expected camera positions for each active side
+        # have contributed at least the mean column (non-empty).
+        if self._corrected_reduced:
+            # For reduced mode, check bfi_left and bfi_right presence
+            sides_done = set()
+            if self._expected_cams["left"]:
+                if row[2] != "":
+                    sides_done.add("left")
+            else:
+                sides_done.add("left")  # no left cameras expected
+            if self._expected_cams["right"]:
+                if row[3] != "":
+                    sides_done.add("right")
+            else:
+                sides_done.add("right")
+            if len(sides_done) == 2:
+                row[0] = abs_id
+                row[1] = round(t, 9)
+                self._write_corrected_row(row)
+                del self._corrected_acc[abs_id]
+        else:
+            # Normal mode: check mean columns for all expected cam positions
+            all_done = True
+            for side_name, side_char in (("left", "l"), ("right", "r")):
+                for cam_id in self._expected_cams[side_name]:
+                    cam_1 = cam_id % 8 + 1
+                    col_idx = _NORMAL_COL_IDX[("mean", side_char, cam_1)]
+                    if row[col_idx] == "":
+                        all_done = False
+                        break
+                if not all_done:
+                    break
+            if all_done:
+                row[0] = abs_id
+                row[1] = round(t, 9)
+                self._write_corrected_row(row)
+                del self._corrected_acc[abs_id]
+
+    def _write_corrected_row(self, row: list) -> None:
         w = self._get_or_open_corrected_writer()
         if w is None:
             return
-        for frame in interval.frames:
-            w.writerow([
-                frame.abs_frame_id,
-                round(frame.t, 9),
-                round(float(frame.mean), 9),
-                round(float(frame.std), 9),
-            ])
+        w.writerow(row)
         if self._corrected_fh is not None:
             self._corrected_fh.flush()
 
@@ -212,7 +363,10 @@ class CsvSink:
             path = os.path.join(self._output_dir, filename)
             fh = open(path, "w", newline="", encoding="utf-8")
             w = csv.writer(fh)
-            w.writerow(self._CORRECTED_HEADERS)
+            if self._corrected_reduced:
+                w.writerow(_REDUCED_HEADERS)
+            else:
+                w.writerow(_NORMAL_HEADERS)
             self._corrected_fh = fh
             self._corrected_csv = w
             return w

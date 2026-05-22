@@ -37,6 +37,7 @@ def test_default_pipeline_has_expected_stages():
     names = [stage.name for stage in pipeline.stages]
     assert names == [
         "frame_classification",
+        "telemetry_ingest",
         "tee:raw",
         "noise_floor", "moments", "pedestal_subtraction",
         "dark_correction", "shot_noise_correction", "bfi_bvi",
@@ -77,6 +78,20 @@ def test_default_pipeline_includes_raw_tee_with_finite_duration():
     )
     raw_tee = next(s for s in pipeline.stages if s.name == "tee:raw")
     assert raw_tee.max_duration_s == 60.0
+
+
+def test_default_pipeline_constructs_a_telemetry_aggregator():
+    cal = _trivial_calibration()
+    meta = ScanMetadata(
+        scan_id="x", subject_id="y", operator="z",
+        started_at_iso="2026-05-22T00:00:00Z", duration_sec=60,
+        left_camera_mask=0xFF, right_camera_mask=0xFF, reduced_mode=False,
+    )
+    pipeline = default_pipeline(metadata=meta, calibration=cal,
+                                pedestals=SensorPedestals(left=64.0, right=64.0))
+    assert pipeline.telemetry_aggregator is not None
+    names = [s.name for s in pipeline.stages]
+    assert "telemetry_ingest" in names
 
 
 def test_default_pipeline_includes_raw_tee_with_none_unbounded():

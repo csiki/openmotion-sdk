@@ -22,6 +22,7 @@ from .stages.bfi_bvi import BfiBviStage
 from .stages.side_avg import SideAveragingStage
 from .stages.rolling_avg import RollingAverageStage
 from .tee import Tee
+from .telemetry import TelemetryAggregator, TelemetryIngestStage
 
 
 ADC_GAIN = (1024 - 64) / 11_000
@@ -48,8 +49,11 @@ def default_pipeline(*,
 
     not_warmup_or_stale = lambda ft: ft != "warmup" and ft != "stale"
 
+    aggregator = TelemetryAggregator()
+
     stages: list = [
         FrameClassificationStage(discard_count=discard_count, dark_interval=dark_interval),
+        TelemetryIngestStage(aggregator=aggregator),
     ]
 
     # Conditionally add raw tee based on raw_save_max_duration_s
@@ -87,4 +91,4 @@ def default_pipeline(*,
         Tee("rolling", filter=not_warmup_or_stale),
     ])
 
-    return Pipeline(stages)
+    return Pipeline(stages, telemetry_aggregator=aggregator)

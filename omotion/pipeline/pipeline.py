@@ -33,8 +33,9 @@ class Pipeline:
     Pipeline routes them through each stage in order, returns the result.
     """
 
-    def __init__(self, stages: list[Stage]):
+    def __init__(self, stages: list[Stage], *, telemetry_aggregator=None):
         self.stages = list(stages)
+        self.telemetry_aggregator = telemetry_aggregator
 
     def process(self, batch: FrameBatch) -> FrameBatch:
         for stage in self.stages:

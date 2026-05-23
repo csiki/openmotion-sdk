@@ -14,8 +14,6 @@ from omotion.connection_state import ConnectionState
 from omotion.MotionProcessing import (
     CorrectedBatch,
     HISTO_SIZE_WORDS,
-    create_science_pipeline,
-    parse_histogram_stream,
 )
 from omotion.Calibration import Calibration
 from omotion.CsvSink import CsvSink

@@ -347,9 +347,12 @@ class MotionInterface:
         )
 
     def start_scan(self, request, **kwargs) -> bool:
-        if self._db_path is not None:
-            kwargs = self._wrap_kwargs_with_db_sink(request, kwargs)
-        return self.scan_workflow.start_scan(request, **kwargs)
+        # Phase E: ScanWorkflow.start_scan no longer accepts callback kwargs —
+        # storage routing is handled by the pipeline's auto-injected sinks
+        # (data_dir → CsvSink, scan_db_path → ScanDBSink). Unknown kwargs are
+        # silently dropped so callers that still pass the legacy callback
+        # arguments don't hard-crash before Phase G migrates them.
+        return self.scan_workflow.start_scan(request)
 
     def _wrap_kwargs_with_db_sink(self, request, kwargs: dict) -> dict:
         """

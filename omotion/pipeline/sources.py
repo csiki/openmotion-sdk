@@ -106,6 +106,7 @@ class CsvReplaySource(_BaseSource):
         frame_ids   = np.array([int(r["frame_id"])      for r in rows], dtype=np.uint8)
         timestamp_s = np.array([float(r["timestamp_s"]) for r in rows], dtype=np.float64)
         timestamp_s = self._apply_timestamp_normalization(timestamp_s)
+        side_ids    = np.full(n, side_idx, dtype=np.int8)
 
         raw_hist = np.zeros((n, 2, 8, 1024), dtype=np.uint32)
         temp_arr = np.zeros((n, 2, 8), dtype=np.float32)
@@ -118,6 +119,7 @@ class CsvReplaySource(_BaseSource):
         return FrameBatch(
             cam_ids=cam_ids,
             frame_ids=frame_ids,
+            side_ids=side_ids,
             raw_histograms=raw_hist,
             temperature_c=temp_arr,
             timestamp_s=timestamp_s,
@@ -167,6 +169,7 @@ class DbReplaySource(_BaseSource):
         n = len(rows)
         cam_ids     = np.zeros(n, dtype=np.int8)
         frame_ids   = np.zeros(n, dtype=np.uint8)
+        side_ids    = np.zeros(n, dtype=np.int8)
         timestamp_s = np.zeros(n, dtype=np.float64)
         raw_hist    = np.zeros((n, 2, 8, 1024), dtype=np.uint32)
         temp_arr    = np.zeros((n, 2, 8), dtype=np.float32)
@@ -175,6 +178,7 @@ class DbReplaySource(_BaseSource):
             side_idx = 0 if side == "left" else 1
             cam_ids[i]     = int(cam_id)
             frame_ids[i]   = int(frame_id)
+            side_ids[i]    = side_idx
             timestamp_s[i] = float(t)
             hist_bytes = bytes(blob)
             hist_arr = np.frombuffer(hist_bytes, dtype=np.uint32, count=1024)
@@ -185,7 +189,7 @@ class DbReplaySource(_BaseSource):
         timestamp_s = self._apply_timestamp_normalization(timestamp_s)
 
         return FrameBatch(
-            cam_ids=cam_ids, frame_ids=frame_ids,
+            cam_ids=cam_ids, frame_ids=frame_ids, side_ids=side_ids,
             raw_histograms=raw_hist, temperature_c=temp_arr,
             timestamp_s=timestamp_s,
             pdc=None, tcm=None, tcl=None,
@@ -347,6 +351,7 @@ class LiveUsbSource(_BaseSource):
         n = len(samples)
         cam_ids     = np.array([s[0] for s in samples], dtype=np.int8)
         frame_ids   = np.array([s[1] for s in samples], dtype=np.uint8)
+        side_ids    = np.full(n, side_idx, dtype=np.int8)
         timestamp_s = np.array([s[2] for s in samples], dtype=np.float64)
         raw_hist    = np.zeros((n, 2, 8, 1024), dtype=np.uint32)
         temps       = np.zeros((n, 2, 8), dtype=np.float32)
@@ -354,7 +359,7 @@ class LiveUsbSource(_BaseSource):
             raw_hist[i, side_idx, cam_id] = histogram
             temps[i, side_idx, cam_id] = temp
         return FrameBatch(
-            cam_ids=cam_ids, frame_ids=frame_ids,
+            cam_ids=cam_ids, frame_ids=frame_ids, side_ids=side_ids,
             raw_histograms=raw_hist, temperature_c=temps,
             timestamp_s=timestamp_s, pdc=None, tcm=None, tcl=None,
         )

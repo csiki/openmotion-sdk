@@ -543,7 +543,10 @@ class DarkCorrectionStage:
             cam_id  = int(batch.cam_ids[i])
             abs_id  = int(batch.abs_frame_ids[i])
             t       = float(batch.timestamp_s[i])
-            side_idx = int(np.argmax(batch.raw_histograms[i].sum(axis=(-2, -1))))
+            # Read side from the per-row side_ids set by the source.
+            # See FrameBatch.side_ids docstring for why inference from
+            # raw_histograms is unsafe (zero-filled rows misroute to side 0).
+            side_idx = int(batch.side_ids[i])
             side = self.SIDE_NAMES[side_idx]
 
             u1 = float(batch.mean_raw[i, side_idx, cam_id])

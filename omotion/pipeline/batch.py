@@ -64,6 +64,22 @@ class StencilFallback(BatchEvent):
 
 
 @dataclass
+class TriggerStateEvent(BatchEvent):
+    """Emitted whenever the laser trigger transitions ON or OFF.
+
+    Dispatched on the "diagnostics" channel. Sinks that care (e.g. the
+    bloodflow-app's scan-notes builder) use these to compute the actual
+    trigger-ON time, distinct from the wall-clock scan duration which
+    includes pre-scan setup and post-scan USB drain.
+
+    ``timestamp_s`` is scan-relative (seconds since the source's first
+    frame timestamp / TelemetryEvent t0), matching the other event types.
+    """
+    state:        str    # "ON" or "OFF"
+    timestamp_s:  float
+
+
+@dataclass
 class TelemetryEvent(BatchEvent):
     """One snapshot of console-level telemetry. Yielded by ConsoleTelemetrySource
     at ~10 Hz; dispatched to "telemetry" sinks and also ingested into the pipeline's
@@ -93,8 +109,8 @@ class FrameBatch:
     """N frames worth of data, two sides, 8 cameras each.
 
     Field ownership (which stage populates which field):
-      Parse:           cam_ids, frame_ids, raw_histograms, temperature_c,
-                       timestamp_s, pdc, tcm, tcl
+      Parse:           cam_ids, frame_ids, side_ids, raw_histograms,
+                       temperature_c, timestamp_s, pdc, tcm, tcl
       Classify:        abs_frame_ids, frame_type
       NoiseFloor:      (mutates raw_histograms in place — no new field)
       Moments:         mean_raw, std_raw, contrast_raw
@@ -116,6 +132,14 @@ class FrameBatch:
     pdc:            Optional[np.ndarray]
     tcm:            Optional[np.ndarray]
     tcl:            Optional[np.ndarray]
+
+    # side_ids[i] ∈ {0, 1}: which sensor module produced row i (0=left, 1=right).
+    # Set by the source (the only place that authoritatively knows the side).
+    # Downstream stages read this directly — never infer side from the
+    # raw_histograms (a dropped/zero-filled frame would silently misroute
+    # to side 0). Optional only so existing sources can be migrated
+    # incrementally and so a missing-source-side defaults to None.
+    side_ids:       Optional[np.ndarray] = None
 
     abs_frame_ids:  Optional[np.ndarray] = None
     frame_type:     Optional[np.ndarray] = None

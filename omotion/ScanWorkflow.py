@@ -367,6 +367,10 @@ class ScanWorkflow:
             telemetry_source=telemetry_source,
         )
 
+        # Anchor for TriggerStateEvent timestamps. Set before the worker
+        # starts so the very first start_trigger emits at ~0.
+        self._scan_t0_monotonic = time.monotonic()
+
         # ── Spawn worker thread ────────────────────────────────────────────
         def _worker():
             try:
@@ -425,6 +429,7 @@ class ScanWorkflow:
                             )
 
                     self._interface.console.start_trigger()
+                    self._emit_trigger_event("ON")
 
                 # ── Duration gate: stop the source when time is up ────────
                 stop_after = float(request.duration_sec)
@@ -435,6 +440,21 @@ class ScanWorkflow:
                         if self._stop_evt.is_set():
                             break
                         time.sleep(0.2)
+                    # Cancel race: cancel_scan() already closed the source
+                    # (and likely called stop_trigger) before we got here.
+                    # Don't re-run stop_trigger/close on a closed source —
+                    # it can blow up on torn-down USB endpoints and would
+                    # block on the already-drained _batch_queue's sentinel
+                    # slot. Just exit.
+                    source_already_closing = getattr(source, "_stop", None) is not None \
+                        and source._stop.is_set()
+                    if source_already_closing:
+                        logger.debug(
+                            "duration_guard: source already closing (cancel path); "
+                            "skipping stop_trigger + close"
+                        )
+                        return
+
                     # Stop the trigger BEFORE closing the source so the MCU
                     # flushes its final DMA buffer (~250 ms latency) while the
                     # stream is still running. Without this, the last frame
@@ -442,10 +462,14 @@ class ScanWorkflow:
                     # already torn down the reader thread.
                     try:
                         self._interface.console.stop_trigger()
+                        self._emit_trigger_event("OFF")
                     except Exception:
                         logger.warning("stop_trigger raised in duration guard", exc_info=True)
                     time.sleep(0.35)
-                    source.close()
+                    try:
+                        source.close()
+                    except Exception:
+                        logger.warning("source.close raised in duration guard", exc_info=True)
 
                 guard_thread = threading.Thread(
                     target=_duration_guard, daemon=True, name="ScanWorkflow-guard"
@@ -496,6 +520,23 @@ class ScanWorkflow:
         )
         self._thread.start()
         return True
+
+    def _emit_trigger_event(self, state: str) -> None:
+        """Push a TriggerStateEvent to the current runner's diagnostics channel.
+
+        Wrapped in try/except because failure to emit a diagnostic event
+        must never abort a scan.
+        """
+        try:
+            from omotion.pipeline.batch import TriggerStateEvent
+            runner = self._runner
+            if runner is None:
+                return
+            t0 = getattr(self, "_scan_t0_monotonic", None)
+            ts = (time.monotonic() - t0) if t0 is not None else 0.0
+            runner.dispatch_event(TriggerStateEvent(state=state, timestamp_s=ts))
+        except Exception:
+            logger.warning("_emit_trigger_event raised", exc_info=True)
 
     @property
     def last_scan_error(self) -> str | None:

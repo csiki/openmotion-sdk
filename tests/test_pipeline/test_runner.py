@@ -176,6 +176,80 @@ def test_runner_no_telemetry_source_means_no_telemetry_thread():
     assert len(sink.consumed) == 1
 
 
+def test_runner_skips_sink_whose_on_scan_start_raised():
+    """If a sink's on_scan_start raises, it must be skipped for the rest of
+    the scan — no consume() calls, no on_complete() call. Otherwise the
+    runner ends up driving methods against a partially-initialized sink
+    (e.g. _meta=None, no open file handle) and a sink crash at startup
+    cascades into spurious consume-time errors."""
+
+    class _BadOnStartSink:
+        channels = {"live"}
+        def __init__(self):
+            self.on_start_calls = 0
+            self.consume_calls = 0
+            self.on_complete_calls = 0
+        def on_scan_start(self, meta):
+            self.on_start_calls += 1
+            raise RuntimeError("boom in on_scan_start")
+        def consume(self, channel, payload):
+            self.consume_calls += 1
+        def on_complete(self):
+            self.on_complete_calls += 1
+
+    bad_sink  = _BadOnStartSink()
+    good_sink = _RecordingSink(channels={"live"})
+    runner = ScanRunner(
+        source=_FakeSource([_empty_batch()], _meta()),
+        pipeline=Pipeline([_EmitTagsStage(["live"])]),
+        sinks=[bad_sink, good_sink],
+    )
+    runner.run()
+
+    assert bad_sink.on_start_calls == 1
+    assert bad_sink.consume_calls == 0, \
+        "consume() must not be invoked against a sink whose on_scan_start raised"
+    assert bad_sink.on_complete_calls == 0, \
+        "on_complete() must not be invoked against a sink whose on_scan_start raised"
+    # Other sinks are not affected.
+    assert len(good_sink.consumed) == 1
+    assert good_sink.on_complete_calls == 1
+
+
+def test_runner_failed_sink_does_not_receive_diagnostic_or_final_events():
+    """The skip applies to all channels, not just 'live' — diagnostics, final, etc."""
+
+    class _BadOnStartSink:
+        channels = {"diagnostics", "final", "live"}
+        def __init__(self):
+            self.consume_calls = []
+        def on_scan_start(self, meta):
+            raise RuntimeError("boom")
+        def consume(self, channel, payload):
+            self.consume_calls.append(channel)
+        def on_complete(self):
+            pass
+
+    class _MultiEmitStage:
+        name = "multi"
+        def process(self, batch):
+            batch.events.append(LiveEmit(channel="live", payload=batch))
+            batch.events.append(IntervalClosed(corrected_batch="interval_payload"))
+            return batch
+        def reset(self): pass
+
+    bad_sink = _BadOnStartSink()
+    runner = ScanRunner(
+        source=_FakeSource([_empty_batch()], _meta()),
+        pipeline=Pipeline([_MultiEmitStage()]),
+        sinks=[bad_sink],
+    )
+    runner.run()
+
+    assert bad_sink.consume_calls == [], \
+        f"failed sink should see no consume calls; got {bad_sink.consume_calls}"
+
+
 def test_runner_calls_on_scan_stop_and_dispatches_flush_events():
     """Stage.on_scan_stop() must be called after source exhausts; any events
     it appends (e.g. IntervalClosed from terminal dark flush) must be

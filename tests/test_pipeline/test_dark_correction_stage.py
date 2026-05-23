@@ -10,15 +10,22 @@ from omotion.pipeline.stages.dark import (
 )
 
 
-def _batch(n_frames, frame_types, abs_ids, *, mean_raw, std_raw, u2=None):
+def _batch(n_frames, frame_types, abs_ids, *, mean_raw, std_raw, u2=None,
+           side_ids=None):
     """Build a minimal FrameBatch — only side=0 cam=0 populated."""
     n = n_frames
     raw_hist = np.zeros((n, 2, 8, 1024), dtype=np.uint32)
     raw_hist[:, 0, 0, 0] = 1   # marker for the only active camera
 
+    if side_ids is None:
+        side_ids_arr = np.zeros(n, dtype=np.int8)
+    else:
+        side_ids_arr = np.asarray(side_ids, dtype=np.int8)
+
     batch = FrameBatch(
         cam_ids=np.zeros(n, dtype=np.int8),
         frame_ids=np.arange(n, dtype=np.uint8),
+        side_ids=side_ids_arr,
         raw_histograms=raw_hist,
         temperature_c=np.zeros((n, 2, 8), dtype=np.float32),
         timestamp_s=np.arange(n, dtype=np.float64) * 0.025,
@@ -116,6 +123,43 @@ def test_emits_enriched_interval_when_calibration_provided():
     assert isinstance(f.bvi, float)
 
 
+def test_zero_filled_row_routes_to_source_assigned_right_side():
+    """A right-side row whose raw_histogram is all zeros (dropped frame /
+    USB stall) must accumulate into the right-side dark history, not left.
+
+    Before the side_ids fix, dark.py used
+    ``np.argmax(raw_histograms[i].sum(axis=(-2, -1)))`` to infer the side,
+    which silently defaults to 0 for an all-zero row.
+    """
+    mean = np.full((1, 2, 8), 100.0, dtype=np.float32)
+    std  = np.full((1, 2, 8), 10.0,  dtype=np.float32)
+    # One right-side dark frame whose raw_histogram is all zeros (the
+    # source still sets side_ids=1 because it knows which endpoint the
+    # frame came from).
+    batch = FrameBatch(
+        cam_ids=np.zeros(1, dtype=np.int8),
+        frame_ids=np.zeros(1, dtype=np.uint8),
+        side_ids=np.array([1], dtype=np.int8),  # right
+        raw_histograms=np.zeros((1, 2, 8, 1024), dtype=np.uint32),
+        temperature_c=np.zeros((1, 2, 8), dtype=np.float32),
+        timestamp_s=np.zeros(1, dtype=np.float64),
+        pdc=None, tcm=None, tcl=None,
+        abs_frame_ids=np.array([10], dtype=np.int64),
+        frame_type=np.array(["dark"], dtype="<U8"),
+        mean_raw=mean, std_raw=std,
+    )
+    stage = DarkCorrectionStage(
+        realtime_estimator=HybridRealtimePredictor(),
+        batch_estimator=LinearInterpolation(),
+    )
+    stage.process(batch)
+
+    # The dark observation should have landed in the right-side history
+    # for cam 0, not the left-side history.
+    assert ("right", 0) in stage._pending
+    assert ("left", 0) not in stage._pending
+
+
 def test_reset_clears_dark_history_and_pending():
     stage = DarkCorrectionStage(
         realtime_estimator=HybridRealtimePredictor(),
@@ -188,6 +232,7 @@ def test_dark_frame_included_in_interval_via_stencil():
     batch = FrameBatch(
         cam_ids=np.zeros(n, dtype=np.int8),
         frame_ids=np.arange(n, dtype=np.uint8),
+        side_ids=np.zeros(n, dtype=np.int8),
         raw_histograms=raw_hist,
         temperature_c=np.zeros((n, 2, 8), dtype=np.float32),
         timestamp_s=np.array(ts, dtype=np.float64),
@@ -260,6 +305,7 @@ def test_terminal_flush_does_not_emit_terminal_dark_as_light():
     process_batch = FrameBatch(
         cam_ids=np.zeros(n, dtype=np.int8),
         frame_ids=np.arange(n, dtype=np.uint8),
+        side_ids=np.zeros(n, dtype=np.int8),
         raw_histograms=raw_hist,
         temperature_c=np.zeros((n, 2, 8), dtype=np.float32),
         timestamp_s=np.arange(n, dtype=np.float64) * 0.025,
@@ -279,6 +325,7 @@ def test_terminal_flush_does_not_emit_terminal_dark_as_light():
     stop_batch = FrameBatch(
         cam_ids=np.zeros(1, dtype=np.int8),
         frame_ids=np.zeros(1, dtype=np.uint8),
+        side_ids=np.zeros(1, dtype=np.int8),
         raw_histograms=np.zeros((1, 2, 8, 1024), dtype=np.uint32),
         temperature_c=np.zeros((1, 2, 8), dtype=np.float32),
         timestamp_s=np.zeros(1, dtype=np.float64),

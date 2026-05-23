@@ -17,8 +17,9 @@ def _meta():
 def _ev(t, pdc):
     return TelemetryEvent(
         timestamp_s=t, pdc_samples=[pdc, pdc + 0.01, pdc + 0.02],
-        tec_setpoint_c=25.0, tec_actual_c=25.1, console_temp_c=37.4,
-        fan_rpm=2400, safety_status=0,
+        tec_setpoint_c=25.0, tec_actual_c=25.1,
+        tec_setpoint_raw=0.612, tec_actual_raw=0.615,
+        safety_status=0, tcm=10, tcl=100,
     )
 
 
@@ -29,8 +30,10 @@ def test_telemetry_sink_header(tmp_path):
     with open(tmp_path / "test_telemetry.csv") as f:
         header = next(csv.reader(f))
     assert header == [
-        "timestamp_s", "pdc_samples_ma", "tec_setpoint_c",
-        "tec_actual_c", "console_temp_c", "fan_rpm", "safety_status",
+        "timestamp_s", "pdc_samples_ma",
+        "tec_setpoint_c", "tec_actual_c",
+        "tec_setpoint_raw", "tec_actual_raw",
+        "tcm", "tcl", "safety_status",
     ]
 
 

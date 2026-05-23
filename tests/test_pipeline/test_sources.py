@@ -367,14 +367,14 @@ def test_console_telemetry_source_yields_events_until_stopped():
         def __init__(self):
             self._snapshots = [
                 SimpleNamespace(timestamp=100.0, pdc=1.10,
-                                tec_set_raw=25.0, tec_v_raw=25.0,
-                                safety_ok=True),
+                                tec_set_raw=0.612, tec_v_raw=0.615,
+                                safety_ok=True, tcm=10, tcl=100),
                 SimpleNamespace(timestamp=100.1, pdc=1.11,
-                                tec_set_raw=25.0, tec_v_raw=25.0,
-                                safety_ok=True),
+                                tec_set_raw=0.612, tec_v_raw=0.615,
+                                safety_ok=True, tcm=11, tcl=110),
                 SimpleNamespace(timestamp=100.2, pdc=1.12,
-                                tec_set_raw=25.0, tec_v_raw=25.0,
-                                safety_ok=True),
+                                tec_set_raw=0.612, tec_v_raw=0.615,
+                                safety_ok=True, tcm=12, tcl=120),
                 None,
             ]
             self._i = 0

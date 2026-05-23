@@ -166,6 +166,12 @@ class ScanWorkflow:
         self._scan_active_handles: list = []
         self._scan_abort_reason: str | None = None
 
+        # Set by the worker thread's finally block. Callers (notably
+        # CalibrationWorkflow) check this after await_complete to decide
+        # whether the scan succeeded.
+        self._last_scan_error: str | None = None
+        self._last_scan_canceled: bool = False
+
     @property
     def running(self) -> bool:
         with self._lock:
@@ -471,18 +477,37 @@ class ScanWorkflow:
                                 )
                             except Exception:
                                 pass
-            except Exception:
+            except Exception as e:
                 logger.exception("ScanWorkflow worker raised")
+                self._last_scan_error = str(e) or type(e).__name__
             finally:
                 with self._lock:
                     self._running = False
                     self._thread = None
+                self._last_scan_canceled = self._stop_evt.is_set()
+
+        # Reset per-scan outcome before spawning the worker so callers
+        # don't see stale state from a prior run.
+        self._last_scan_error = None
+        self._last_scan_canceled = False
 
         self._thread = threading.Thread(
             target=_worker, daemon=True, name="ScanWorkflow-scan"
         )
         self._thread.start()
         return True
+
+    @property
+    def last_scan_error(self) -> str | None:
+        """Error message from the most recent scan worker, or None on
+        success. Cleared at the start of each new scan."""
+        return self._last_scan_error
+
+    @property
+    def last_scan_canceled(self) -> bool:
+        """True if the most recent scan was canceled (stop_evt was set
+        before the worker finished). Cleared at the start of each new scan."""
+        return self._last_scan_canceled
 
     def await_complete(self, *, timeout_sec: float | None = None) -> None:
         """Block until the current scan worker thread finishes (or the

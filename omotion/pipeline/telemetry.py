@@ -14,6 +14,8 @@ import threading
 from collections import deque
 from typing import Optional, Deque
 
+import numpy as np
+
 from .batch import FrameBatch, TelemetryEvent
 
 
@@ -65,17 +67,20 @@ class TelemetryIngestStage:
             return batch
 
         n = batch.timestamp_s.size
-        pdc: list = []
-        tcm: list = []
-        tcl: list = []
+        pdc = np.full(n, np.nan, dtype=np.float32)
+        tcm = np.zeros(n, dtype=np.int64)
+        tcl = np.zeros(n, dtype=np.int64)
         for i in range(n):
             event = self._aggregator.snapshot_at(float(batch.timestamp_s[i]))
             if event is None:
-                pdc.append(None); tcm.append(None); tcl.append(None)
-            else:
-                pdc.append(event.pdc_samples)
-                tcm.append(event.console_temp_c)  # console temp monitor
-                tcl.append(event.tec_actual_c)    # TEC actual
+                continue
+            # pdc_samples is a list of recent PDC readings (mA). Use the
+            # mean if multiple are present so a per-frame scalar best
+            # represents the laser power over that frame's exposure.
+            if event.pdc_samples:
+                pdc[i] = float(np.mean(event.pdc_samples))
+            tcm[i] = int(event.tcm)
+            tcl[i] = int(event.tcl)
 
         batch.pdc = pdc
         batch.tcm = tcm
@@ -83,5 +88,8 @@ class TelemetryIngestStage:
         return batch
 
     def reset(self) -> None:
-        if self._aggregator is not None:
-            self._aggregator.clear()
+        # NOTE: intentionally does NOT clear the aggregator. Telemetry history
+        # is owned by the source and must outlive transient pipeline
+        # exceptions (Pipeline.reset() runs after any stage raises); clearing
+        # here would drop history mid-scan on every recoverable error.
+        pass

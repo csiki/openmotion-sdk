@@ -240,22 +240,40 @@ class LiveUsbSource(_BaseSource):
             t.start()
             self._reader_threads.append(t)
 
-        while not self._stop.is_set():
+        while True:
             try:
                 batch = self._batch_queue.get(timeout=1.0)
             except queue.Empty:
+                if self._stop.is_set():
+                    # close() set stop, readers have joined and pushed the
+                    # sentinel (or the sentinel slot was full); the queue is
+                    # genuinely empty, no more batches will arrive.
+                    break
                 continue
             if batch is None:
+                # Sentinel from close(): all readers finished, everything
+                # they were going to produce has already been yielded.
                 break
             yield batch
 
     def close(self) -> None:
-        # Match the legacy stop sequence: stop_streaming → drain_final.
-        # ScanWorkflow handles the trigger-off + ~0.35s DMA-flush wait before
-        # calling close(); here we just shut down the USB stream and feed any
-        # late-arriving final transfer back through the parser before the
-        # reader threads exit.
-        self._stop.set()
+        # Ordering matters here. The legacy SciencePipeline lost the final
+        # frame if stop_streaming ran before the MCU's DMA flushed; we
+        # additionally have to guarantee the parser thread sees the drained
+        # bytes AND that the runner thread sees the resulting FrameBatch
+        # before iteration ends.
+        #
+        # Sequence:
+        #   1. stop_streaming + drain_final on each side. The drained chunks
+        #      are pushed into the per-side packet queue while the parser is
+        #      still running (no stop signal yet) so the parser will consume
+        #      them on its next iteration.
+        #   2. Set self._stop so parse_histogram_stream's `not stop_evt or
+        #      not q.empty()` loop drains its queue then exits.
+        #   3. Join the per-side reader threads — by now they've batched the
+        #      drained chunks and pushed any final FrameBatch to _batch_queue.
+        #   4. Push a None sentinel to _batch_queue so __iter__ exits cleanly
+        #      after delivering the last batch to the runner.
         expected_size = getattr(self, "_expected_size", None)
         for side_name, sensor in self._sensors.items():
             if sensor is None or getattr(sensor, "uart", None) is None:
@@ -279,8 +297,13 @@ class LiveUsbSource(_BaseSource):
                                 pass
                 except Exception:
                     pass
+        self._stop.set()
         for t in self._reader_threads:
-            t.join(timeout=2.0)
+            t.join(timeout=5.0)
+        try:
+            self._batch_queue.put(None, timeout=0.5)
+        except queue.Full:
+            pass
 
     def _reader_loop(self, side_name: str) -> None:
         """Per-side reader. Delegates packet parsing to parse_histogram_stream;
@@ -353,6 +376,10 @@ class ConsoleTelemetrySource:
         self._t0 = None
 
     def __iter__(self):
+        from omotion.console_telemetry_conversions import (
+            tec_thermistor_voltage_to_celsius,
+        )
+
         while not self._stop.is_set():
             snap = self._console.telemetry.get_snapshot()
             if snap is None:
@@ -360,18 +387,16 @@ class ConsoleTelemetrySource:
                 continue
             if self._t0 is None:
                 self._t0 = snap.timestamp
-            # Map ConsoleTelemetry fields to TelemetryEvent.
-            # tec_set_raw / tec_v_raw are raw ADC voltages; app converts to °C
-            # For now, pass raw values (they'll be converted by the sink/aggregator).
-            # safety_ok is a bool; convert to int (0=ok, 1=fault) for safety_status.
             yield TelemetryEvent(
                 timestamp_s=snap.timestamp - self._t0,
-                pdc_samples=[snap.pdc],  # pdc is a single float (mA), wrap in list
-                tec_setpoint_c=snap.tec_set_raw,  # raw setpoint voltage (app converts)
-                tec_actual_c=snap.tec_v_raw,      # raw measured voltage (app converts)
-                console_temp_c=0.0,                # not available in ConsoleTelemetry snapshot
-                fan_rpm=0,                         # not available in ConsoleTelemetry snapshot
-                safety_status=0 if snap.safety_ok else 1,  # 0=ok, 1=fault
+                pdc_samples=[snap.pdc],
+                tec_setpoint_c=tec_thermistor_voltage_to_celsius(snap.tec_set_raw),
+                tec_actual_c=tec_thermistor_voltage_to_celsius(snap.tec_v_raw),
+                tec_setpoint_raw=float(snap.tec_set_raw),
+                tec_actual_raw=float(snap.tec_v_raw),
+                safety_status=0 if snap.safety_ok else 1,
+                tcm=int(snap.tcm),
+                tcl=int(snap.tcl),
             )
 
     def close(self) -> None:

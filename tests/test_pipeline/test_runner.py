@@ -142,9 +142,11 @@ def test_runner_telemetry_source_routes_events_to_aggregator_and_sinks():
 
     fake_events = [
         TelemetryEvent(timestamp_s=0.0, pdc_samples=[1.0], tec_setpoint_c=25,
-                       tec_actual_c=25, console_temp_c=37, fan_rpm=2400, safety_status=0),
+                       tec_actual_c=25, tec_setpoint_raw=0.612, tec_actual_raw=0.615,
+                       safety_status=0, tcm=10, tcl=100),
         TelemetryEvent(timestamp_s=0.1, pdc_samples=[1.05], tec_setpoint_c=25,
-                       tec_actual_c=25, console_temp_c=37, fan_rpm=2400, safety_status=0),
+                       tec_actual_c=25, tec_setpoint_raw=0.612, tec_actual_raw=0.615,
+                       safety_status=0, tcm=11, tcl=110),
     ]
     telemetry_sink = _RecordingSink(channels={"telemetry"})
     agg = TelemetryAggregator()

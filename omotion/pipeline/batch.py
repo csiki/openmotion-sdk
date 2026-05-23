@@ -67,14 +67,25 @@ class StencilFallback(BatchEvent):
 class TelemetryEvent(BatchEvent):
     """One snapshot of console-level telemetry. Yielded by ConsoleTelemetrySource
     at ~10 Hz; dispatched to "telemetry" sinks and also ingested into the pipeline's
-    TelemetryAggregator for future per-frame correction stages."""
-    timestamp_s:    float
-    pdc_samples:    list
-    tec_setpoint_c: float
-    tec_actual_c:   float
-    console_temp_c: float
-    fan_rpm:        int
-    safety_status:  int
+    TelemetryAggregator for future per-frame correction stages.
+
+    All "_c" fields are degrees Celsius (TEC thermistor temperatures, converted
+    from raw ADC by omotion.console_telemetry_conversions). The "_raw" fields
+    carry the original ADC counts for downstream tooling that wants them.
+
+    `tcm` / `tcl` are the MCU and laser trigger counters (per-snapshot integer
+    counts since scan start); they're propagated into FrameBatch.tcm/tcl by
+    TelemetryIngestStage for raw-CSV output.
+    """
+    timestamp_s:      float
+    pdc_samples:      list           # list[float] (mA)
+    tec_setpoint_c:   float          # °C (converted)
+    tec_actual_c:     float          # °C (converted)
+    tec_setpoint_raw: float          # raw ADC LSBs
+    tec_actual_raw:   float          # raw ADC LSBs
+    safety_status:    int            # 0 = ok, 1 = fault
+    tcm:              int            # MCU trigger counter (lsync pulses)
+    tcl:              int            # laser trigger counter
 
 
 @dataclass

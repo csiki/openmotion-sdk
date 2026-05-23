@@ -85,6 +85,42 @@ def _corrected_headers_reduced() -> list[str]:
 _NORMAL_HEADERS = _corrected_headers_normal()
 _REDUCED_HEADERS = _corrected_headers_reduced()
 
+
+def _scalar_or_blank(arr, i):
+    """Pull arr[i] as a float, returning "" for missing/None/NaN values.
+
+    Used for raw-CSV cells where ``""`` is the schema's "no telemetry"
+    marker. TelemetryIngestStage now populates np.ndarrays with NaN where
+    no telemetry snapshot was available; CSV writers should emit blank for
+    those cells.
+    """
+    if arr is None:
+        return ""
+    try:
+        v = float(arr[i])
+    except (TypeError, ValueError):
+        return ""
+    if v != v:  # NaN
+        return ""
+    return v
+
+
+def _scalar_or_default(arr, i, default=0.0):
+    """Pull arr[i] as a float, returning ``default`` for missing/NaN.
+
+    Used for DB columns where NULL would be acceptable but the schema
+    is currently NOT NULL — keep the default to preserve writability.
+    """
+    if arr is None:
+        return default
+    try:
+        v = float(arr[i])
+    except (TypeError, ValueError):
+        return default
+    if v != v:  # NaN
+        return default
+    return v
+
 # Maps (metric, side_char, cam_1indexed) -> column index in _NORMAL_HEADERS
 _NORMAL_COL_IDX: dict[tuple[str, str, int], int] = {
     (metric, side, cam): _NORMAL_HEADERS.index(f"{metric}_{side}{cam}")
@@ -205,10 +241,9 @@ class CsvSink:
             if batch.frame_type is not None:
                 frame_type = str(batch.frame_type[i])
 
-            temp = float(batch.temperature_c[i, 0, cam_id]) if batch.temperature_c is not None else ""
-            pdc_val = float(batch.pdc[i]) if batch.pdc is not None else ""
-            tcm_val = float(batch.tcm[i]) if batch.tcm is not None else ""
-            tcl_val = float(batch.tcl[i]) if batch.tcl is not None else ""
+            pdc_val = _scalar_or_blank(batch.pdc, i)
+            tcm_val = _scalar_or_blank(batch.tcm, i)
+            tcl_val = _scalar_or_blank(batch.tcl, i)
 
             # Determine side from cam_id: left=side 0, right=side 1
             # The batch has shape (N, 2, 8, 1024) for raw_histograms.
@@ -224,6 +259,10 @@ class CsvSink:
                 w = self._get_or_open_raw_writer(side_name, mask)
                 if w is None:
                     continue
+                temp = (
+                    float(batch.temperature_c[i, side_idx, cam_id])
+                    if batch.temperature_c is not None else ""
+                )
                 histo = batch.raw_histograms[i, side_idx, cam_id, :]
                 histo_list = histo.tolist()
                 histo_sum = int(np.sum(histo))
@@ -507,15 +546,18 @@ class ScanDBSink:
             cam_id = int(batch.cam_ids[i])
             frame_id = int(batch.frame_ids[i])
             ts = float(batch.timestamp_s[i])
-            temp = float(batch.temperature_c[i, 0, cam_id]) if batch.temperature_c is not None else None
-            pdc_val = float(batch.pdc[i]) if batch.pdc is not None else 0.0
-            tcm_val = float(batch.tcm[i]) if batch.tcm is not None else 0.0
-            tcl_val = float(batch.tcl[i]) if batch.tcl is not None else 0.0
+            pdc_val = _scalar_or_default(batch.pdc, i, 0.0)
+            tcm_val = _scalar_or_default(batch.tcm, i, 0.0)
+            tcl_val = _scalar_or_default(batch.tcl, i, 0.0)
 
             for side_idx, side_name in enumerate(("left", "right")):
                 mask = meta.left_camera_mask if side_idx == 0 else meta.right_camera_mask
                 if mask == 0 or not (mask & (1 << cam_id)):
                     continue
+                temp = (
+                    float(batch.temperature_c[i, side_idx, cam_id])
+                    if batch.temperature_c is not None else None
+                )
                 histo = batch.raw_histograms[i, side_idx, cam_id, :]
                 hist_bytes = _pack.pack(*histo.tolist())
                 histo_sum = int(np.sum(histo))
@@ -562,8 +604,10 @@ class TelemetrySink:
         self._fh = open(self._output_path, "w", newline="")
         self._writer = csv.writer(self._fh)
         self._writer.writerow([
-            "timestamp_s", "pdc_samples_ma", "tec_setpoint_c",
-            "tec_actual_c", "console_temp_c", "fan_rpm", "safety_status",
+            "timestamp_s", "pdc_samples_ma",
+            "tec_setpoint_c", "tec_actual_c",
+            "tec_setpoint_raw", "tec_actual_raw",
+            "tcm", "tcl", "safety_status",
         ])
 
     def consume(self, channel: str, payload: Any) -> None:
@@ -573,8 +617,11 @@ class TelemetrySink:
         self._writer.writerow([
             f"{event.timestamp_s:.4f}",
             ";".join(f"{s:.3f}" for s in event.pdc_samples),
-            event.tec_setpoint_c, event.tec_actual_c,
-            event.console_temp_c, event.fan_rpm, event.safety_status,
+            f"{event.tec_setpoint_c:.4f}",
+            f"{event.tec_actual_c:.4f}",
+            f"{event.tec_setpoint_raw:.6f}",
+            f"{event.tec_actual_raw:.6f}",
+            event.tcm, event.tcl, event.safety_status,
         ])
 
     def on_complete(self) -> None:

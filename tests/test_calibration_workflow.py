@@ -81,59 +81,73 @@ def interface():
     return iface
 
 
-def _make_fake_scan(left, right):
-    """Return a function that mimics scan_workflow.start_scan.
+def _make_fake_scan_workflow(interface, left, right):
+    """Patch interface.scan_workflow so start_scan synthesises corrected
+    samples through the sink contract used by the new pipeline (Phase E).
 
-    Spawns a thread that:
-      1. Synthesises a corrected CorrectedBatch with one Sample per
-         (side, cam) and emits it via on_corrected_batch_fn (matching
-         the new live-capture flow used by CalibrationWorkflow).
-      2. Calls on_complete_fn with a ScanResult pointing at fixture
-         paths so the workflow has CSV artifacts.
+    Drives the _CalibrationCollectorSink directly: on_scan_start ->
+    consume("final", EnrichedCorrectedInterval) -> on_complete.
+    Sets scan_workflow.running True briefly then False so the polling
+    loop in _run_subscan_capture exits with last_scan_error=None.
     """
-    from omotion.MotionProcessing import CorrectedBatch, Sample
+    from omotion.pipeline.stages.dark import (
+        EnrichedCorrectedFrame, EnrichedCorrectedInterval,
+    )
 
-    def _make_batch():
-        samples = []
+    def _make_interval():
+        frames = []
         for side in ("left", "right"):
             for cam_id in range(8):
-                # Multiple samples per camera so per-frame averaging
-                # has something to average.
                 for fid in range(50, 100):
-                    samples.append(Sample(
-                        side=side, cam_id=cam_id, frame_id=fid,
-                        absolute_frame_id=fid, timestamp_s=fid / 40.0,
-                        row_sum=1000, temperature_c=25.0,
-                        mean=200.0, std_dev=80.0, contrast=0.4,
-                        bfi=5.0, bvi=5.0,
-                        is_corrected=True, is_dark=False,
+                    frames.append(EnrichedCorrectedFrame(
+                        abs_frame_id=fid, t=fid / 40.0, side=side, cam_id=cam_id,
+                        mean=200.0, std=80.0, contrast=0.4, bfi=5.0, bvi=5.0,
                     ))
-        return CorrectedBatch(
-            dark_frame_start=10, dark_frame_end=240, samples=samples,
-        )
+        return EnrichedCorrectedInterval(left_abs=10, right_abs=240, frames=frames)
 
-    def _fake(req, *, on_complete_fn=None, on_log_fn=None,
-              on_corrected_batch_fn=None, **kw):
+    sw = interface.scan_workflow
+    done_evt = threading.Event()
+
+    def _fake_start_scan(req):
+        sw._running = True
+        sw._last_scan_error = None
+        sw._last_scan_canceled = False
+
         def _run():
             time.sleep(0.05)
-            if on_corrected_batch_fn:
-                on_corrected_batch_fn(_make_batch())
-            res = ScanResult(
-                ok=True, error="", left_path=left, right_path=right,
-                canceled=False, scan_timestamp="20260501_000000",
-            )
-            if on_complete_fn:
-                on_complete_fn(res)
+            for sink in req.sinks:
+                try:
+                    sink.on_scan_start(None)
+                except Exception:
+                    pass
+                try:
+                    sink.consume("final", _make_interval())
+                except Exception:
+                    pass
+                try:
+                    sink.on_complete()
+                except Exception:
+                    pass
+            sw._running = False
+            done_evt.set()
+
         threading.Thread(target=_run, daemon=True).start()
         return True
-    return _fake
+
+    def _fake_await(*, timeout_sec=None):
+        done_evt.wait(timeout=timeout_sec)
+
+    sw.start_scan = _fake_start_scan
+    sw.await_complete = _fake_await
+    # last_scan_error / last_scan_canceled / running come straight from
+    # the real ScanWorkflow attrs we just twiddled above.
 
 
 def test_happy_path_produces_csv_and_passes(interface, request_obj):
     if not _have_fixtures():
         pytest.skip("fixture CSVs missing")
 
-    interface.scan_workflow.start_scan = _make_fake_scan(_LEFT, _RIGHT)
+    _make_fake_scan_workflow(interface, _LEFT, _RIGHT)
     interface.write_calibration = MagicMock(
         return_value=Calibration(
             c_min=np.zeros((2, 8)), c_max=np.full((2, 8), 0.5),
@@ -162,25 +176,29 @@ def test_cancel_during_phase_1(interface, request_obj):
     if not _have_fixtures():
         pytest.skip("fixture CSVs missing")
 
+    sw = interface.scan_workflow
     started = threading.Event()
     cancel_called = threading.Event()
 
-    def _slow_scan(req, *, on_complete_fn=None, **kw):
+    def _slow_scan(req):
+        sw._running = True
+        sw._last_scan_error = None
+        sw._last_scan_canceled = False
+
         def _run():
             started.set()
             cancel_called.wait(timeout=5.0)
-            if on_complete_fn:
-                on_complete_fn(ScanResult(
-                    ok=False, error="canceled", left_path="", right_path="",
-                    canceled=True, scan_timestamp="x",
-                ))
+            sw._last_scan_canceled = True
+            sw._running = False
+
         threading.Thread(target=_run, daemon=True).start()
         return True
 
-    interface.scan_workflow.start_scan = _slow_scan
-    interface.scan_workflow.cancel_scan = MagicMock(
-        side_effect=lambda **kw: cancel_called.set()
+    sw.start_scan = _slow_scan
+    sw.await_complete = lambda *, timeout_sec=None: (
+        time.sleep(min(0.1, timeout_sec)) if timeout_sec else None
     )
+    sw.cancel_scan = MagicMock(side_effect=lambda **kw: cancel_called.set())
     interface.write_calibration = MagicMock()
 
     done = threading.Event()
@@ -200,17 +218,28 @@ def test_cancel_during_phase_1(interface, request_obj):
 
 
 def test_phase1_scan_failure_aborts_before_write(interface, request_obj):
-    def _fail_scan(req, *, on_complete_fn=None, **kw):
-        threading.Thread(
-            target=lambda: on_complete_fn(ScanResult(
-                ok=False, error="USB lost", left_path="", right_path="",
-                canceled=False, scan_timestamp="x",
-            )),
-            daemon=True,
-        ).start()
+    """When the underlying scan worker raises, _run_subscan_capture should
+    surface the error message via scan_workflow.last_scan_error so the
+    workflow aborts before write_calibration is touched."""
+    sw = interface.scan_workflow
+
+    def _fail_scan(req):
+        sw._running = True
+        sw._last_scan_error = None
+        sw._last_scan_canceled = False
+
+        def _run():
+            time.sleep(0.02)
+            sw._last_scan_error = "USB lost"
+            sw._running = False
+
+        threading.Thread(target=_run, daemon=True).start()
         return True
 
-    interface.scan_workflow.start_scan = _fail_scan
+    done_join = threading.Event()
+    sw.start_scan = _fail_scan
+    sw.await_complete = lambda *, timeout_sec=None: done_join.wait(timeout=timeout_sec)
+
     interface.write_calibration = MagicMock()
 
     done = threading.Event()
@@ -219,6 +248,9 @@ def test_phase1_scan_failure_aborts_before_write(interface, request_obj):
         request_obj,
         on_complete_fn=lambda r: (box.append(r), done.set()),
     )
+    # Let the fake scan thread finish before the polling loop awaits.
+    time.sleep(0.05)
+    done_join.set()
     assert done.wait(timeout=10.0)
     r = box[0]
     assert r.ok is False

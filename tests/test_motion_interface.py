@@ -24,3 +24,28 @@ def test_motion_interface_defaults_when_args_omitted():
     assert motion.data_dir is None
     assert motion.scan_db_path is None
     assert motion.operator_id is None
+
+
+# ---------------------------------------------------------------------------
+# Task 15: contact_quality_workflow lazy property
+# ---------------------------------------------------------------------------
+
+def test_motion_interface_lazy_loads_contact_quality_workflow():
+    """contact_quality_workflow should be a ContactQualityWorkflow instance
+    and should be cached (same object on repeated access)."""
+    from omotion.ContactQualityWorkflow import ContactQualityWorkflow
+
+    motion = MotionInterface(demo_mode=True)
+    cq = motion.contact_quality_workflow
+    assert isinstance(cq, ContactQualityWorkflow)
+    # Second access returns the same cached instance.
+    assert motion.contact_quality_workflow is cq
+
+
+def test_motion_interface_cq_workflow_shares_scan_workflow():
+    """The contact_quality_workflow must be wired to the same scan_workflow
+    instance so the scan-running lock is shared."""
+    motion = MotionInterface(demo_mode=True)
+    cq = motion.contact_quality_workflow
+    sw = motion.scan_workflow
+    assert cq._scan_workflow is sw

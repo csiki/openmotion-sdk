@@ -93,6 +93,7 @@ class MotionInterface:
         # dependencies at import time for users who only want device control.
         self._scan_workflow = None
         self._calibration_workflow = None
+        self._cq_workflow = None
         self._monitor: Optional[ConnectionMonitor] = None
         self._started = False
         # Set by ``_wrap_kwargs_with_db_sink`` for the duration of a
@@ -321,6 +322,22 @@ class MotionInterface:
 
             self._calibration_workflow = CalibrationWorkflow(self)
         return self._calibration_workflow
+
+    @property
+    def contact_quality_workflow(self):
+        """Lazy-loaded :class:`~omotion.ContactQualityWorkflow.ContactQualityWorkflow`.
+
+        Backed by the same :attr:`scan_workflow` instance so the CQ check
+        and normal scans share the scan-running lock — only one can be active
+        at a time.
+        """
+        if self._cq_workflow is None:
+            from omotion.ContactQualityWorkflow import ContactQualityWorkflow
+
+            self._cq_workflow = ContactQualityWorkflow(
+                scan_workflow=self.scan_workflow
+            )
+        return self._cq_workflow
 
     @property
     def calibration_running(self) -> bool:

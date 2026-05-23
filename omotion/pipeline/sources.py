@@ -10,6 +10,7 @@ for the scan. Concrete sources:
 from __future__ import annotations
 
 import csv
+import logging
 import queue
 import sqlite3
 import threading
@@ -21,6 +22,9 @@ import numpy as np
 
 from .batch import FrameBatch
 from .sinks import ScanMetadata
+
+
+logger = logging.getLogger("omotion.pipeline.sources")
 
 
 @runtime_checkable
@@ -265,9 +269,7 @@ class LiveUsbSource(_BaseSource):
         # Set self._stop FIRST so any concurrent caller (e.g. the duration
         # guard waking up while cancel() is mid-close, or a redundant
         # cancel from the worker's finally block) sees source already
-        # closing and short-circuits. Without this gate we'd call
-        # stop_streaming/drain_final twice per side and double-log the
-        # stop banner.
+        # closing and short-circuits.
         #
         # parse_histogram_stream still drains its queue via
         # `not stop_evt.is_set() or not q.empty()`, so setting stop early
@@ -278,28 +280,53 @@ class LiveUsbSource(_BaseSource):
             return  # already closing or closed
         self._stop.set()
         expected_size = getattr(self, "_expected_size", None)
-        for side_name, sensor in self._sensors.items():
+
+        # Tear down BOTH sides in parallel. Sequential teardown was a
+        # latent stream-recovery bug: while the first side drained, the
+        # second side's MCU kept pumping into its USB host-endpoint
+        # buffer. By the time stop_streaming hit the second side, that
+        # buffer was full and the still-running stream loop had a
+        # blocking dev.read that wouldn't release for many seconds —
+        # long enough that drain_final raced into the same endpoint and
+        # got a pipe error (errno 32). That pipe error sometimes left
+        # the stream thread alive in a half-dead state, so the next
+        # scan's start_streaming bailed with "Stream already running"
+        # and that side's data silently went nowhere.
+        def _stop_side(side_name: str, sensor) -> None:
             if sensor is None or getattr(sensor, "uart", None) is None:
-                continue
+                return
             histo = getattr(sensor.uart, "histo", None)
             if histo is None:
-                continue
+                return
             try:
                 histo.stop_streaming()
             except Exception:
-                pass
-            if expected_size is not None:
-                try:
-                    final_chunks = histo.drain_final(expected_size=expected_size)
-                    q = self._packet_queues.get(side_name)
-                    if q is not None and final_chunks:
-                        for chunk in final_chunks:
-                            try:
-                                q.put(chunk, timeout=0.5)
-                            except queue.Full:
-                                pass
-                except Exception:
-                    pass
+                logger.exception("stop_streaming(%s) raised", side_name)
+            if expected_size is None:
+                return
+            try:
+                final_chunks = histo.drain_final(expected_size=expected_size)
+                q = self._packet_queues.get(side_name)
+                if q is not None and final_chunks:
+                    for chunk in final_chunks:
+                        try:
+                            q.put(chunk, timeout=0.5)
+                        except queue.Full:
+                            pass
+            except Exception:
+                logger.exception("drain_final(%s) raised", side_name)
+
+        teardown_threads: list[threading.Thread] = []
+        for side_name, sensor in self._sensors.items():
+            t = threading.Thread(
+                target=_stop_side, args=(side_name, sensor),
+                name=f"LiveUsbSource-close-{side_name}", daemon=True,
+            )
+            t.start()
+            teardown_threads.append(t)
+        for t in teardown_threads:
+            t.join(timeout=10.0)
+
         for t in self._reader_threads:
             t.join(timeout=5.0)
         try:
@@ -361,4 +388,3 @@ class LiveUsbSource(_BaseSource):
             raw_histograms=raw_hist, temperature_c=temps,
             timestamp_s=timestamp_s, pdc=None, tcm=None, tcl=None,
         )
-

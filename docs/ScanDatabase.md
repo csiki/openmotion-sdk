@@ -1,6 +1,6 @@
 # Scan Database
 
-OpenMOTION supports persisting scan output to a per-installation SQLite database in
+Open-Motion supports persisting scan output to a per-installation SQLite database in
 addition to (or eventually instead of) the per-scan CSVs the SDK has always written.
 This document covers the rationale, configuration, schema, lifecycle, and how to
 inspect the data.
@@ -32,7 +32,7 @@ iface.start()
 `db_path=None` (the default) means no sink is constructed; the SDK behaves
 identically to today and no DB file is ever created.
 
-The OpenMOTION Bloodflow app exposes this via two `app_config.json` keys:
+The Open-Motion Bloodflow app exposes this via two `app_config.json` keys:
 
 | Key | Type | Default | Description |
 | --- | --- | --- | --- |

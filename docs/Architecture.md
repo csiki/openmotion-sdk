@@ -1,8 +1,8 @@
-# OpenMotion SDK — Software Architecture
+# Open-Motion SDK — Software Architecture
 
 ## Overview
 
-The OpenMotion SDK is a Python library for controlling optical speckle imaging hardware. It manages two classes of physical device: a **console module** (connected via USB virtual COM port / UART) and up to two **sensor modules** (connected via composite USB bulk-transfer interfaces). The SDK handles device discovery, connection lifecycle, command/response communication, high-speed histogram streaming, science computation, and firmware programming. A thin signal abstraction makes the same SDK usable in both PyQt6 desktop applications and headless Python scripts.
+The Open-Motion SDK is a Python library for controlling optical speckle imaging hardware. It manages two classes of physical device: a **console module** (connected via USB virtual COM port / UART) and up to two **sensor modules** (connected via composite USB bulk-transfer interfaces). The SDK handles device discovery, connection lifecycle, command/response communication, high-speed histogram streaming, science computation, and firmware programming. A thin signal abstraction makes the same SDK usable in both PyQt6 desktop applications and headless Python scripts.
 
 ---
 

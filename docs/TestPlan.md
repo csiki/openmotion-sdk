@@ -1,8 +1,8 @@
-# OpenMotion SDK — Test Plan
+# Open-Motion SDK — Test Plan
 
 ## Overview
 
-This document defines the hardware-in-the-loop test suite for the OpenMotion SDK. Tests are grouped by system (console / sensor), then by subsystem, and finally by individual function. The plan also covers common command sequences, communication-path verification, and the recommended pytest infrastructure for a GitHub Actions CI workflow backed by physical hardware runners.
+This document defines the hardware-in-the-loop test suite for the Open-Motion SDK. Tests are grouped by system (console / sensor), then by subsystem, and finally by individual function. The plan also covers common command sequences, communication-path verification, and the recommended pytest infrastructure for a GitHub Actions CI workflow backed by physical hardware runners.
 
 All tests are written against the public SDK API (`MOTIONConsole`, `MOTIONSensor`, `MOTIONInterface`). Lower-level transport classes (`MOTIONUart`, `CommInterface`, `StreamInterface`) are exercised indirectly; dedicated transport tests are called out where the transport behaviour itself is the thing under test.
 

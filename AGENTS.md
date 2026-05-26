@@ -1,6 +1,6 @@
 # AGENTS.md - openmotion-sdk
 
-This repo is the Python SDK for OpenMOTION hardware. It packages the `omotion`
+This repo is the Python SDK for Open-Motion hardware. It packages the `omotion`
 library used by the bloodflow app and other tools.
 
 ## Architecture

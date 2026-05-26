@@ -403,7 +403,7 @@ Get the SDK version string.
 **Example:**
 ```python
 version = MOTIONInterface.get_sdk_version()
-print(f"OpenMOTION SDK version: {version}")
+print(f"Open-Motion SDK version: {version}")
 ```
 
 ---

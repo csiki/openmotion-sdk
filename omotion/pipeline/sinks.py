@@ -170,7 +170,7 @@ class CsvSink:
         "final" — per-interval corrected output
 
     Raw file naming: ``{scan_id}_{subject_id}_{side}_mask{XX}_raw.csv``
-    Corrected file naming: ``{scan_id}_corrected.csv``
+    Corrected file naming: ``{scan_id}_{subject_id}_corrected.csv``
 
     Normal mode corrected CSV: 82-column wide format matching legacy SciencePipeline
     output (frame_id, timestamp_s, bfi_l1..bfi_r8, bvi_l1..bvi_r8,
@@ -421,7 +421,16 @@ class CsvSink:
             return None
         try:
             os.makedirs(self._output_dir, exist_ok=True)
-            filename = f"{meta.scan_id}_corrected.csv"
+            # Match the raw-CSV naming convention so the bloodflow-app's
+            # History dropdown / get_scan_details() can recover the subject
+            # from the filename. Without subject_id here, the dropdown
+            # shows only timestamps and the Visualize buttons stay disabled
+            # (no correctedPath found via the regex-based scan-id parse).
+            filename = (
+                f"{meta.scan_id}_{meta.subject_id}_corrected.csv"
+                if meta.subject_id
+                else f"{meta.scan_id}_corrected.csv"
+            )
             path = os.path.join(self._output_dir, filename)
             fh = open(path, "w", newline="", encoding="utf-8")
             w = csv.writer(fh)

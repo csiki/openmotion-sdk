@@ -442,16 +442,38 @@ class ScanWorkflow:
                         )
                         return
 
-                    # Stop the trigger BEFORE closing the source so the MCU
-                    # flushes its final DMA buffer (~250 ms latency) while the
-                    # stream is still running. Without this, the last frame
-                    # lands in the host endpoint after stop_streaming() has
-                    # already torn down the reader thread.
+                    # Teardown order matches the legacy SciencePipeline path:
+                    #
+                    #   stop_trigger -> 0.5s -> disable_camera -> 0.35s -> close
+                    #
+                    # Why disable_camera BEFORE source.close (stop_streaming):
+                    # After stop_trigger the laser is off but the camera FSIN
+                    # scheduler keeps capturing frames (now darks) into the
+                    # firmware DMA buffer. If we stop_streaming first, the
+                    # camera continues filling DMA with no host reader, and
+                    # by the time disable_camera fires (in the worker's
+                    # `finally`) the firmware ends up in a half-state that
+                    # fails the next scan's READY check at flash time —
+                    # "left camera N not READY for FPGA/config." Calling
+                    # disable_camera first stops the DMA being filled at the
+                    # source so close() drains cleanly and the camera lands
+                    # in standby ready for the next flash.
                     try:
                         self._interface.console.stop_trigger()
                         self._emit_trigger_event("OFF")
                     except Exception:
                         logger.warning("stop_trigger raised in duration guard", exc_info=True)
+                    time.sleep(0.5)
+                    for side, mask, _ in active_sides:
+                        try:
+                            self._interface.run_on_sensors(
+                                "disable_camera", mask, target=side
+                            )
+                        except Exception:
+                            logger.warning(
+                                "disable_camera(%s) raised in duration guard",
+                                side, exc_info=True,
+                            )
                     time.sleep(0.35)
                     try:
                         source.close()
@@ -471,6 +493,11 @@ class ScanWorkflow:
                     self._stop_evt.set()
                     guard_thread.join(timeout=2.0)
 
+                    # stop_trigger + disable_camera are normally done by
+                    # _duration_guard above; the calls here are idempotent
+                    # safety nets for the cancel-from-cancel_scan path where
+                    # the guard short-circuits on the source_already_closing
+                    # check and never runs them.
                     try:
                         self._interface.console.stop_trigger()
                     except Exception:
@@ -478,9 +505,6 @@ class ScanWorkflow:
 
                     if active_sides:
                         self._scan_unsubscribe_state()
-
-                        time.sleep(0.5)
-
                         for side, mask, _ in active_sides:
                             try:
                                 self._interface.run_on_sensors(

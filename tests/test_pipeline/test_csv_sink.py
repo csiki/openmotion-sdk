@@ -169,7 +169,7 @@ def test_corrected_csv_normal_mode_header_has_82_columns(tmp_path):
     sink.consume("final", _make_enriched_interval())
     sink.on_complete()
 
-    files = list(tmp_path.glob("*corrected*.csv"))
+    files = [p for p in tmp_path.glob("*.csv") if not p.name.endswith("_raw.csv")]
     assert len(files) == 1
     with open(files[0]) as fh:
         header = next(csv.reader(fh))
@@ -186,7 +186,7 @@ def test_corrected_csv_reduced_mode_header_has_6_columns(tmp_path):
     sink.consume("final", _make_enriched_interval())
     sink.on_complete()
 
-    files = list(tmp_path.glob("*corrected*.csv"))
+    files = [p for p in tmp_path.glob("*.csv") if not p.name.endswith("_raw.csv")]
     assert len(files) == 1
     with open(files[0]) as fh:
         header = next(csv.reader(fh))
@@ -203,7 +203,7 @@ def test_corrected_csv_normal_mode_places_values_in_correct_columns(tmp_path):
                                                     abs_frame_id=5, t=0.1))
     sink.on_complete()
 
-    files = list(tmp_path.glob("*corrected*.csv"))
+    files = [p for p in tmp_path.glob("*.csv") if not p.name.endswith("_raw.csv")]
     with open(files[0]) as fh:
         rows = list(csv.reader(fh))
     assert len(rows) >= 2, "No data rows produced"
@@ -232,7 +232,7 @@ def test_corrected_csv_normal_mode_right_side_cam3(tmp_path):
                                                     abs_frame_id=7, t=0.175))
     sink.on_complete()
 
-    files = list(tmp_path.glob("*corrected*.csv"))
+    files = [p for p in tmp_path.glob("*.csv") if not p.name.endswith("_raw.csv")]
     with open(files[0]) as fh:
         rows = list(csv.reader(fh))
     header = rows[0]
@@ -248,7 +248,7 @@ def test_corrected_csv_reduced_mode_populates_left_columns(tmp_path):
     sink.consume("final", _make_enriched_interval(side="left", cam_id=0))
     sink.on_complete()
 
-    files = list(tmp_path.glob("*corrected*.csv"))
+    files = [p for p in tmp_path.glob("*.csv") if not p.name.endswith("_raw.csv")]
     with open(files[0]) as fh:
         rows = list(csv.reader(fh))
     header = rows[0]
@@ -311,7 +311,7 @@ def test_csv_sink_flushes_row_when_all_expected_cams_contribute_including_nan(tm
 
     sink.on_complete()
 
-    files = list(tmp_path.glob("*corrected*.csv"))
+    files = [p for p in tmp_path.glob("*.csv") if not p.name.endswith("_raw.csv")]
     assert len(files) == 1
     with open(files[0]) as fh:
         rows = list(csv.reader(fh))
@@ -358,7 +358,7 @@ def test_csv_sink_partial_row_flushed_on_complete(tmp_path):
 
     sink.on_complete()
 
-    files = list(tmp_path.glob("*corrected*.csv"))
+    files = [p for p in tmp_path.glob("*.csv") if not p.name.endswith("_raw.csv")]
     assert len(files) == 1
     with open(files[0]) as fh:
         rows = list(csv.reader(fh))

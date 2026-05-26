@@ -169,8 +169,14 @@ class CsvSink:
         "raw"   — per-frame raw histograms (gated by meta.write_raw_csv)
         "final" — per-interval corrected output
 
-    Raw file naming: ``{scan_id}_{subject_id}_{side}_mask{XX}_raw.csv``
-    Corrected file naming: ``{scan_id}_{subject_id}_corrected.csv``
+    Raw file naming:       ``{scan_id}_{subject_id}_{side}_mask{XX}_raw.csv``
+    Corrected file naming: ``{scan_id}_{subject_id}.csv``
+
+    The corrected stream is the default output — naming it ``_corrected``
+    doesn't add information, and the ``_raw`` suffix on histogram CSVs
+    already disambiguates them. See issue #44 / commit 71bee4c for the
+    rationale; the pipeline cutover's first pass regressed this back to
+    ``_corrected.csv`` until it was restored.
 
     Normal mode corrected CSV: 82-column wide format matching legacy SciencePipeline
     output (frame_id, timestamp_s, bfi_l1..bfi_r8, bvi_l1..bvi_r8,
@@ -421,16 +427,18 @@ class CsvSink:
             return None
         try:
             os.makedirs(self._output_dir, exist_ok=True)
-            # Match the raw-CSV naming convention so the bloodflow-app's
-            # History dropdown / get_scan_details() can recover the subject
-            # from the filename. Without subject_id here, the dropdown
-            # shows only timestamps and the Visualize buttons stay disabled
-            # (no correctedPath found via the regex-based scan-id parse).
-            filename = (
-                f"{meta.scan_id}_{meta.subject_id}_corrected.csv"
+            # Post-#44 naming: the canonical corrected CSV is just
+            # {scan_id}_{subject_id}.csv — no _corrected suffix. The
+            # _raw suffix on histogram CSVs disambiguates them. When
+            # subject_id is empty (e.g. some calibration paths), we
+            # fall back to {scan_id}.csv so the file still has a stable
+            # name.
+            stem = (
+                f"{meta.scan_id}_{meta.subject_id}"
                 if meta.subject_id
-                else f"{meta.scan_id}_corrected.csv"
+                else meta.scan_id
             )
+            filename = f"{stem}.csv"
             path = os.path.join(self._output_dir, filename)
             fh = open(path, "w", newline="", encoding="utf-8")
             w = csv.writer(fh)

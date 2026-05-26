@@ -165,7 +165,7 @@ def _run_pipeline(raw_csv: pathlib.Path, out_dir: pathlib.Path) -> pathlib.Path:
     sink = CsvSink(output_dir=str(out_dir))
     ScanRunner(source=source, pipeline=pipeline, sinks=[sink]).run()
 
-    corrected_files = list(out_dir.glob("*corrected*.csv"))
+    corrected_files = [p for p in out_dir.glob("*.csv") if not p.name.endswith("_raw.csv")]
     if not corrected_files:
         raise RuntimeError(
             "Pipeline produced no corrected CSV — "

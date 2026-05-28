@@ -22,6 +22,7 @@ import platform
 import socket
 import sys
 import threading
+import dataclasses
 from dataclasses import dataclass
 from typing import Callable, Optional, TYPE_CHECKING
 
@@ -99,6 +100,7 @@ class CalibrationRequest:
     #   }
     trigger_config: Optional[dict] = None
     notes: str = ""
+    average_full_scan: bool = False
 
 
 @dataclass
@@ -135,6 +137,28 @@ class CalibrationResult:
     validation_scan_left_path: str
     validation_scan_right_path: str
     started_timestamp: str
+
+
+@dataclass
+class TestScanResult:
+    """Outcome of a stand-alone Test scan — phase 1 only, no calibration
+    write, no validation scan. Shape mirrors ``CalibrationResult`` so the
+    bloodflow-app's QML layer can re-use the row formatting code, but the
+    fields are scoped to what a test scan actually produces (no
+    ``calibration`` field — Test scans don't write to console EEPROM, no
+    ``validation_scan_*_path`` — there's no validation scan).
+    """
+    ok: bool
+    passed: bool
+    canceled: bool
+    error: str
+    csv_path: str
+    json_path: str
+    rows: list[CalibrationResultRow]
+    test_scan_left_path: str
+    test_scan_right_path: str
+    started_timestamp: str
+    mode: str = "test"
 
 
 # ---------------------------------------------------------------------------
@@ -588,6 +612,7 @@ def write_result_json(
     calibration: Optional[Calibration],
     scan_paths: dict,
     interface,
+    mode: str = "calibrate",
 ) -> None:
     """Write a self-describing JSON manifest of the calibration run.
 
@@ -611,6 +636,7 @@ def write_result_json(
 
     manifest = {
         "schema_version": _JSON_SCHEMA_VERSION,
+        "mode": mode,
         "started_timestamp": started_timestamp,
         "started_iso": started_iso,
         "passed": passed,
@@ -911,6 +937,17 @@ class CalibrationWorkflow:
             # Bound the trailing edge to keep the firmware's terminal
             # dark frame (and any laser ramp-down) out of the average.
             window_frames = int(round(request.duration_sec * CAPTURE_HZ))
+            # Phase 1 (calibration scan) widens its averaging window
+            # to swallow every laser-on corrected sample after the
+            # leading scan_delay_sec skip when average_full_scan is set
+            # (#132 — "all of the corrected data ... averaged, not just
+            # the rolling average numbers"). Dark frames flow through
+            # on_dark_frame_fn, not on_corrected_batch, so they're not
+            # affected by this widening. Phase 4 (validation scan)
+            # keeps the original window.
+            phase1_window_frames = (
+                10 ** 9 if request.average_full_scan else window_frames
+            )
 
             def _flash_sensors() -> tuple[bool, str]:
                 """Re-flash the FPGA bitstream and reinitialize the
@@ -1024,6 +1061,13 @@ class CalibrationWorkflow:
                     request.duration_sec + request.scan_delay_sec,
                     request.duration_sec, request.scan_delay_sec,
                 )
+                if request.average_full_scan:
+                    logger.info(
+                        "Calibration phase 1: average_full_scan=True — "
+                        "averaging every laser-on corrected sample after "
+                        "the %d-frame leading skip (no upper-bound window).",
+                        skip_frames,
+                    )
                 _reset_firmware_trigger("phase 1 (pre-scan)")
                 # _cal_dark_samples deliberately discarded — the ambient
                 # check (#122) gates on validation-scan dark frames so it
@@ -1035,7 +1079,7 @@ class CalibrationWorkflow:
                     subject_id=f"calib1_{request.operator_id}",
                     duration_sec=request.duration_sec + request.scan_delay_sec,
                     skip_leading_frames=skip_frames,
-                    frame_window_count=window_frames,
+                    frame_window_count=phase1_window_frames,
                     stop_evt=self._stop_evt,
                 )
                 logger.info(
@@ -1226,6 +1270,286 @@ class CalibrationWorkflow:
 
         self._thread = threading.Thread(
             target=_worker, name="CalibrationWorker", daemon=True,
+        )
+        self._thread.start()
+        return True
+
+    def start_test_scan(
+        self,
+        request: CalibrationRequest,
+        *,
+        on_log_fn: Optional[Callable[[str], None]] = None,
+        on_progress_fn: Optional[Callable[[str], None]] = None,
+        on_complete_fn: Optional[Callable[["TestScanResult"], None]] = None,
+    ) -> bool:
+        """Run just the calibration scan (CalibrationWorkflow phase 1)
+        as a stand-alone diagnostic. No calibration write, no validation
+        scan. Returns False if a calibration or test scan is already in
+        flight. Forces ``request.average_full_scan = True`` so the Test
+        results reflect the same averaging the calibration math would
+        use (#132).
+        """
+        with self._lock:
+            if self._running:
+                logger.warning("start_test_scan refused: already running.")
+                return False
+            self._running = True
+        self._stop_evt = threading.Event()
+
+        # Test scans always average all laser-on samples — single source
+        # of truth so the connector doesn't have to remember to set this.
+        request = dataclasses.replace(request, average_full_scan=True)
+
+        def _emit_log(msg: str) -> None:
+            logger.info(msg)
+            if on_log_fn:
+                on_log_fn(msg)
+
+        def _emit_progress(stage: str) -> None:
+            if on_progress_fn:
+                on_progress_fn(stage)
+
+        def _worker() -> None:
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            test_left = test_right = ""
+            csv_path = ""
+            json_path = ""
+            rows: list[CalibrationResultRow] = []
+            ok = False
+            passed = False
+            error = ""
+            canceled = False
+
+            logger.info(
+                "Test scan: starting (operator=%s, output_dir=%s, "
+                "masks=(0x%02X, 0x%02X), duration_sec=%d, scan_delay_sec=%d, "
+                "max_duration_sec=%d, ts=%s)",
+                request.operator_id, request.output_dir,
+                request.left_camera_mask, request.right_camera_mask,
+                request.duration_sec, request.scan_delay_sec,
+                request.max_duration_sec, ts,
+            )
+
+            def _watchdog() -> None:
+                self._stop_evt.set()
+                logger.warning(
+                    "Test-scan watchdog fired after %d sec; aborting.",
+                    request.max_duration_sec,
+                )
+                try:
+                    self._interface.scan_workflow.cancel_scan()
+                except Exception:
+                    pass
+
+            wd = threading.Timer(request.max_duration_sec, _watchdog)
+            wd.daemon = True
+            wd.start()
+
+            skip_frames = int(round(request.scan_delay_sec * CAPTURE_HZ))
+            window_frames = int(round(request.duration_sec * CAPTURE_HZ))
+            phase1_window_frames = (
+                10 ** 9 if request.average_full_scan else window_frames
+            )
+
+            # Inner helpers — duplicate the calibration worker's shape
+            # rather than refactor, so this method ships as a single
+            # contained change. The two flash/trigger helpers below are
+            # textually identical to the calibration worker's; consider
+            # extracting later if a third caller appears.
+            def _flash_sensors() -> tuple[bool, str]:
+                from omotion.ScanWorkflow import ConfigureRequest, ConfigureResult
+
+                cfg_req = ConfigureRequest(
+                    left_camera_mask=request.left_camera_mask,
+                    right_camera_mask=request.right_camera_mask,
+                    power_off_unused_cameras=False,
+                )
+                evt = threading.Event()
+                holder: dict[str, ConfigureResult] = {}
+
+                def _on_done(r: ConfigureResult) -> None:
+                    holder["r"] = r
+                    evt.set()
+
+                def _on_log(msg: str) -> None:
+                    logger.info("Test-scan flash: %s", msg)
+
+                started = self._interface.start_configure_camera_sensors(
+                    cfg_req,
+                    on_log_fn=_on_log,
+                    on_complete_fn=_on_done,
+                )
+                if not started:
+                    return False, (
+                        "start_configure_camera_sensors refused "
+                        "(another configure already running?)"
+                    )
+
+                while not evt.wait(timeout=0.2):
+                    if self._stop_evt.is_set():
+                        return False, "canceled during flash"
+                res = holder.get("r")
+                if res is None:
+                    return False, "flash completed with no result"
+                return bool(res.ok), str(res.error or "")
+
+            def _reset_firmware_trigger(phase_label: str) -> None:
+                trigger_cfg = self._interface.resolve_trigger_config(
+                    request.trigger_config
+                )
+                try:
+                    self._interface.console.set_trigger_json(data=trigger_cfg)
+                    logger.info(
+                        "Test scan %s: trigger reset OK "
+                        "(firmware fsync_counter=1).", phase_label,
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Test scan %s: trigger reset failed: %s. "
+                        "Continuing — dark-integrity monitor will catch "
+                        "any schedule misalignment.",
+                        phase_label, e,
+                    )
+
+            try:
+                _emit_progress("flash_sensors")
+                _emit_log("Test scan: flashing sensors / FPGA…")
+                flash_ok, flash_err = _flash_sensors()
+                if not flash_ok:
+                    error = f"flash phase failed: {flash_err}"
+                    if "canceled" in flash_err:
+                        canceled = True
+                    return
+                if self._stop_evt.is_set():
+                    canceled = True
+                    error = "canceled after flash"
+                    return
+
+                _emit_progress("test_scan")
+                _emit_log("Test scan: starting…")
+                _reset_firmware_trigger("test (pre-scan)")
+                test_left, test_right, test_samples, test_dark_samples = _run_subscan_capture(
+                    self._interface, request,
+                    subject_id=f"test_{request.operator_id}",
+                    duration_sec=request.duration_sec + request.scan_delay_sec,
+                    skip_leading_frames=skip_frames,
+                    frame_window_count=phase1_window_frames,
+                    stop_evt=self._stop_evt,
+                )
+                logger.info(
+                    "Test scan done: %d corrected samples captured live; "
+                    "raw CSVs: left=%s  right=%s",
+                    len(test_samples),
+                    test_left or "(none)", test_right or "(none)",
+                )
+                if self._stop_evt.is_set():
+                    canceled = True
+                    error = "canceled during test scan"
+                    return
+
+                _emit_progress("evaluate")
+                _emit_log("Test scan: evaluating…")
+                rows = _build_result_rows_from_samples(
+                    test_samples,
+                    dark_samples=test_dark_samples,
+                    left_camera_mask=request.left_camera_mask,
+                    right_camera_mask=request.right_camera_mask,
+                    thresholds=request.thresholds,
+                    sensor_left=getattr(self._interface, "left", None),
+                    sensor_right=getattr(self._interface, "right", None),
+                )
+                csv_path = os.path.join(
+                    request.output_dir, f"test-{ts}.csv"
+                )
+                write_result_csv(csv_path, rows)
+                # Test "passed" uses the same gate as calibration but
+                # without BFI/BVI participating — Test acceptance is
+                # mean + contrast + dark only (see spec R5/R6).
+                passed = bool(rows) and all(
+                    r.mean_test == "PASS"
+                    and r.contrast_test == "PASS"
+                    and r.dark_test != "FAIL"
+                    for r in rows
+                )
+                pass_count = sum(
+                    1 for r in rows
+                    if r.mean_test == "PASS"
+                    and r.contrast_test == "PASS"
+                    and r.dark_test != "FAIL"
+                )
+                logger.info(
+                    "Test scan result table:\n%s",
+                    _format_result_rows_table(rows, request.thresholds),
+                )
+                logger.info(
+                    "Test scan done: %d/%d cameras PASS, overall=%s. CSV: %s",
+                    pass_count, len(rows), "PASS" if passed else "FAIL",
+                    csv_path,
+                )
+                ok = True
+            except Exception as e:
+                logger.exception("Test scan worker failed.")
+                if not error:
+                    error = f"{type(e).__name__}: {e}"
+            finally:
+                wd.cancel()
+                if self._stop_evt.is_set() and not canceled:
+                    canceled = True
+                    if not error:
+                        error = (
+                            f"test scan exceeded max_duration_sec="
+                            f"{request.max_duration_sec}"
+                        )
+
+                try:
+                    json_path = os.path.join(
+                        request.output_dir, f"test-{ts}.json"
+                    )
+                    write_result_json(
+                        json_path,
+                        started_timestamp=ts,
+                        passed=passed,
+                        canceled=canceled,
+                        error=error,
+                        request=request,
+                        rows=rows,
+                        calibration=None,
+                        scan_paths={
+                            "test_left": test_left,
+                            "test_right": test_right,
+                        },
+                        interface=self._interface,
+                        mode="test",
+                    )
+                    logger.info("Test scan manifest written: %s", json_path)
+                except Exception:
+                    logger.exception("Failed to write test scan JSON manifest.")
+                    json_path = ""
+
+                logger.info(
+                    "Test scan: procedure complete (ok=%s, passed=%s, "
+                    "canceled=%s, error=%r)",
+                    ok, passed, canceled, error,
+                )
+
+                result = TestScanResult(
+                    ok=ok, passed=passed, canceled=canceled, error=error,
+                    csv_path=csv_path, json_path=json_path,
+                    rows=rows,
+                    test_scan_left_path=test_left,
+                    test_scan_right_path=test_right,
+                    started_timestamp=ts,
+                )
+                with self._lock:
+                    self._running = False
+                if on_complete_fn:
+                    try:
+                        on_complete_fn(result)
+                    except Exception:
+                        logger.exception("on_complete_fn raised.")
+
+        self._thread = threading.Thread(
+            target=_worker, name="TestScanWorker", daemon=True,
         )
         self._thread.start()
         return True

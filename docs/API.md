@@ -61,6 +61,25 @@ iface = MotionInterface(demo_mode=True)
 iface.start()
 ```
 
+### Runnable examples
+
+[`scripts/sdk_examples.py`](../scripts/sdk_examples.py) drives each operation in
+this guide against **connected hardware** and prints the result. Run one, or all
+in sequence:
+
+```
+python scripts/sdk_examples.py connect          # §2  connect + version
+python scripts/sdk_examples.py configure        # §4  configure cameras
+python scripts/sdk_examples.py contact-quality  # §4  per-camera CQ verdicts
+python scripts/sdk_examples.py scan             # §3  run a short scan
+python scripts/sdk_examples.py read-scan        # §5  summarize the scan DB
+python scripts/sdk_examples.py test-scan        # §4  per-camera test rows
+python scripts/sdk_examples.py                  # all of the above, one connection
+```
+
+(`scan` and `test-scan` turn the laser on; `read-scan` is read-only and needs no
+hardware. Output lands under a temp directory printed at connect time.)
+
 ---
 
 ## 2. `MotionInterface` — the facade

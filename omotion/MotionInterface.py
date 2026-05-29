@@ -375,7 +375,7 @@ class MotionInterface:
     def cancel_configure_camera_sensors(self, **kwargs) -> None:
         self.scan_workflow.cancel_configure_camera_sensors(**kwargs)
 
-    def apply_laser_power(self, *, force_fault: bool = False) -> bool:
+    def apply_laser_power(self, *, force_fault: bool = False, lock=None) -> bool:
         """Write the laser-driver configuration to the console over I2C.
 
         Required as a cold-start step: after a power-cycle the driver
@@ -383,10 +383,13 @@ class MotionInterface:
         is applied. Call once after connecting and before any laser scan
         (scan / contact-quality / calibration / test). Uses the SDK's bundled
         laser params (see :mod:`omotion.laser`); ``force_fault=True`` loads the
-        safety-trip set for exercising the interlock. Returns True on success.
+        safety-trip set for exercising the interlock. ``lock`` (anything with
+        ``lock()``/``unlock()``) is held for the duration of the writes — pass
+        a console mutex when calling from a multithreaded context. Returns True
+        on success.
         """
         from omotion.laser import apply_laser_power as _apply
-        return _apply(self.console, force_fault=force_fault)
+        return _apply(self.console, force_fault=force_fault, lock=lock)
 
     # ──────────────────────────────────────────────────────────────────
     # Logging helpers

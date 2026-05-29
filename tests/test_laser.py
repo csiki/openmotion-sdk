@@ -58,3 +58,27 @@ def test_apply_laser_power_returns_false_on_write_failure():
 def test_apply_laser_power_false_when_no_params():
     # Empty params + a map that finds nothing → nothing to apply.
     assert apply_laser_power(_FakeConsole(), laser_params=[]) is False
+
+
+class _Lock:
+    def __init__(self):
+        self.locked = 0
+        self.unlocked = 0
+
+    def lock(self):
+        self.locked += 1
+
+    def unlock(self):
+        self.unlocked += 1
+
+
+def test_apply_laser_power_holds_lock_around_writes():
+    lk = _Lock()
+    assert apply_laser_power(_FakeConsole(), lock=lk) is True
+    assert lk.locked == 1 and lk.unlocked == 1
+
+
+def test_apply_laser_power_releases_lock_on_write_failure():
+    lk = _Lock()
+    assert apply_laser_power(_FakeConsole(write_ok=False), lock=lk) is False
+    assert lk.locked == 1 and lk.unlocked == 1

@@ -98,6 +98,7 @@ def apply_laser_power(
     laser_params: Optional[list] = None,
     fpga_map: Optional[FpgaMap] = None,
     force_fault: bool = False,
+    lock: Optional[Any] = None,
 ) -> bool:
     """Write the laser-driver configuration to ``console`` over I2C.
 
@@ -112,6 +113,11 @@ def apply_laser_power(
             (``load_laser_params(force_fault)``).
         fpga_map: friendlyName→I2C map; defaults to the bundled ``FpgaMap``.
         force_fault: when ``laser_params`` is None, load the fault set instead.
+        lock: optional mutex (anything with ``lock()``/``unlock()``) held for
+            the duration of the I2C writes so the whole sequence is atomic
+            w.r.t. other console access. Pass the app's console mutex when
+            delegating from a multithreaded context; ``None`` = no external
+            lock (the console serializes individual packets itself).
     """
     if laser_params is None:
         laser_params = load_laser_params(force_fault=force_fault)
@@ -146,87 +152,93 @@ def apply_laser_power(
     if opt_thresh is not None or opt_gain is not None:
         skip_entries.add(_OPT_DRIVE_CL)
 
-    for idx, laser_param in enumerate(laser_params, start=1):
-        friendly_name = laser_param["friendlyName"]
-        fpga_entry = fpga_map.get_entry_by_friendly_name(friendly_name)
-        if fpga_entry is None:
-            logger.error("Laser parameter entry not found: %s", friendly_name)
-            continue
+    if lock is not None:
+        lock.lock()
+    try:
+        for idx, laser_param in enumerate(laser_params, start=1):
+            friendly_name = laser_param["friendlyName"]
+            fpga_entry = fpga_map.get_entry_by_friendly_name(friendly_name)
+            if fpga_entry is None:
+                logger.error("Laser parameter entry not found: %s", friendly_name)
+                continue
 
-        mux_idx = fpga_entry["mux_idx"]
-        channel = fpga_entry["channel"]
-        i2c_addr = fpga_entry["i2c_addr"]
-        data_size = fpga_entry["data_size"]
-        offset = fpga_entry["start_address"]
+            mux_idx = fpga_entry["mux_idx"]
+            channel = fpga_entry["channel"]
+            i2c_addr = fpga_entry["i2c_addr"]
+            data_size = fpga_entry["data_size"]
+            offset = fpga_entry["start_address"]
 
-        data_to_send = bytearray(laser_param["dataToSend"])
+            data_to_send = bytearray(laser_param["dataToSend"])
 
-        if (channel, offset) in skip_entries:
-            logger.info(
-                "Skipping JSON entry ch=%d off=0x%02X (overridden by user config)",
-                channel, offset,
-            )
-            continue
-
-        if friendly_name in user_cfg:
-            override_val = user_cfg[friendly_name]
-            num_bytes = int(data_size.rstrip("B")) // 8
-            scale = fpga_entry.get("scale")
-            try:
-                raw_int = float(override_val)
-                if scale:
-                    raw_int = raw_int / scale
-                max_val = (1 << (num_bytes * 8)) - 1
-                raw_int = max(0, min(max_val, int(round(raw_int))))
-                byteorder = "big" if fpga_entry.get("isMsbFirst", False) else "little"
-                data_to_send = bytearray(raw_int.to_bytes(num_bytes, byteorder=byteorder))
-                logger.info("Override %s raw=%d", friendly_name, raw_int)
-            except Exception as e:
-                logger.warning(
-                    "Could not convert override for %s: %s, using default",
-                    friendly_name, e,
+            if (channel, offset) in skip_entries:
+                logger.info(
+                    "Skipping JSON entry ch=%d off=0x%02X (overridden by user config)",
+                    channel, offset,
                 )
+                continue
 
-        logger.info(
-            "(%d/%d) Writing I2C: muxIdx=%d, channel=%d, i2cAddr=0x%02X, "
-            "offset=0x%02X, data=%s",
-            idx, len(laser_params), mux_idx, channel, i2c_addr, offset,
-            [f"0x{b:02X}" for b in data_to_send],
-        )
-        if not console.write_i2c_packet(
-            mux_index=mux_idx,
-            channel=channel,
-            device_addr=i2c_addr,
-            reg_addr=offset,
-            data=data_to_send,
-        ):
-            logger.error(
-                "Failed to set laser power (muxIdx=%d, channel=%d)", mux_idx, channel
+            if friendly_name in user_cfg:
+                override_val = user_cfg[friendly_name]
+                num_bytes = int(data_size.rstrip("B")) // 8
+                scale = fpga_entry.get("scale")
+                try:
+                    raw_int = float(override_val)
+                    if scale:
+                        raw_int = raw_int / scale
+                    max_val = (1 << (num_bytes * 8)) - 1
+                    raw_int = max(0, min(max_val, int(round(raw_int))))
+                    byteorder = "big" if fpga_entry.get("isMsbFirst", False) else "little"
+                    data_to_send = bytearray(raw_int.to_bytes(num_bytes, byteorder=byteorder))
+                    logger.info("Override %s raw=%d", friendly_name, raw_int)
+                except Exception as e:
+                    logger.warning(
+                        "Could not convert override for %s: %s, using default",
+                        friendly_name, e,
+                    )
+
+            logger.info(
+                "(%d/%d) Writing I2C: muxIdx=%d, channel=%d, i2cAddr=0x%02X, "
+                "offset=0x%02X, data=%s",
+                idx, len(laser_params), mux_idx, channel, i2c_addr, offset,
+                [f"0x{b:02X}" for b in data_to_send],
             )
+            if not console.write_i2c_packet(
+                mux_index=mux_idx,
+                channel=channel,
+                device_addr=i2c_addr,
+                reg_addr=offset,
+                data=data_to_send,
+            ):
+                logger.error(
+                    "Failed to set laser power (muxIdx=%d, channel=%d)", mux_idx, channel
+                )
+                return False
+
+        # User-config safety DRIVE CL overrides, written after the JSON pass.
+        # 16-bit LSB-first uint16 raw register value (isMsbFirst=false).
+        def _write_drive_cl(ch: int, thresh, gain, label: str) -> bool:
+            if thresh is None:
+                return True
+            set_value = thresh
+            gain_f = float(gain) if gain is not None else 0.0
+            if gain_f != 0.0:
+                set_value = thresh / gain_f
+            raw = max(0, min(0xFFFF, int(round(set_value))))
+            data = bytearray([raw & 0xFF, (raw >> 8) & 0xFF])
+            logger.info("Writing user-config %s DRIVE CL: raw=%d, gain=%s", label, raw, gain_f)
+            return console.write_i2c_packet(
+                mux_index=1, channel=ch, device_addr=0x41, reg_addr=0x10, data=data
+            )
+
+        if not _write_drive_cl(6, ee_thresh, ee_gain, "Safety EE"):
+            logger.error("Failed to write user-config Safety EE DRIVE CL")
+            return False
+        if not _write_drive_cl(7, opt_thresh, opt_gain, "Safety OPT"):
+            logger.error("Failed to write user-config Safety OPT DRIVE CL")
             return False
 
-    # User-config safety DRIVE CL overrides, written after the JSON pass.
-    # 16-bit LSB-first uint16 raw register value (isMsbFirst=false).
-    def _write_drive_cl(ch: int, thresh, gain, label: str) -> bool:
-        if thresh is None:
-            return True
-        set_value = thresh
-        gain_f = float(gain) if gain is not None else 0.0
-        if gain_f != 0.0:
-            set_value = thresh / gain_f
-        raw = max(0, min(0xFFFF, int(round(set_value))))
-        data = bytearray([raw & 0xFF, (raw >> 8) & 0xFF])
-        logger.info("Writing user-config %s DRIVE CL: raw=%d, gain=%s", label, raw, gain_f)
-        return console.write_i2c_packet(
-            mux_index=1, channel=ch, device_addr=0x41, reg_addr=0x10, data=data
-        )
-
-    if not _write_drive_cl(6, ee_thresh, ee_gain, "Safety EE"):
-        logger.error("Failed to write user-config Safety EE DRIVE CL")
-        return False
-    if not _write_drive_cl(7, opt_thresh, opt_gain, "Safety OPT"):
-        logger.error("Failed to write user-config Safety OPT DRIVE CL")
-        return False
-
-    logger.info("Laser power set successfully.")
-    return True
+        logger.info("Laser power set successfully.")
+        return True
+    finally:
+        if lock is not None:
+            lock.unlock()

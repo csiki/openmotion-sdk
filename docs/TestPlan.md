@@ -10,6 +10,8 @@ All tests are written against the public SDK API (`MotionConsole`, `MotionSensor
 
 **How to read this plan.** This document describes HIL coverage **by subsystem** — what each subsystem's hardware tests are meant to verify. It is **not** a line-by-line registry of every test function: the executable tests under `tests/test_*.py` are the authoritative, live registry. Individual test names below are illustrative of intent and may have drifted (renames, splits); when in doubt, the code wins. Coverage we intend but have not yet built is collected in **§8 Known coverage gaps / backlog**.
 
+For the **whole-suite view** (all 504 tests grouped by SDK architecture layer, the software-vs-hardware split, and per-layer coverage ratings), see [`TestSuite.md`](TestSuite.md). This plan covers only the HIL tier.
+
 ---
 
 ## 1. Test Environment and Fixtures

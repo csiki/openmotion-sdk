@@ -76,7 +76,8 @@ Signals are `pyqtSignal` when PyQt is importable, otherwise a fallback `MotionSi
 | `docs/ConsoleTelemetry.md` | PDC (dark correction) + TEC telemetry. |
 | `docs/CameraArrangement.md` | Camera orientation reference. |
 | `docs/Releasing.md` | Release process — `next → main` PR enforced before tagging. |
-| `docs/TestPlan.md` | Hardware test strategy. |
+| `docs/TestPlan.md` | Hardware-in-the-loop test plan + coverage backlog. |
+| `docs/TestSuite.md` | Whole-suite overview — all tests grouped by SDK layer, sw/hw split, per-layer coverage. |
 
 ## Gotchas
 

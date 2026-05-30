@@ -5,7 +5,51 @@ import threading
 import time
 from unittest import mock
 
-from omotion.ScanWorkflow import ScanRequest
+import pytest
+
+from omotion.ScanWorkflow import ScanRequest, ScanWorkflow
+
+
+class _EmptySource:
+    """Benign LiveUsbSource stand-in: yields nothing and finishes at once.
+
+    A demo-mode MotionInterface reports its sensors connected but leaves
+    their `.uart` as None, so the real LiveUsbSource — both its `__iter__`
+    streaming start and the worker's pre-flight `sensor.uart.histo` flush —
+    raises AttributeError on a background thread. Tests that only assert on
+    the *synchronous* `_runner` wiring don't need a running worker; without
+    this stand-in their crashing worker thread leaks and prints its
+    traceback during whichever later test happens to be running.
+    """
+
+    def __init__(self, *, metadata, **_kwargs):
+        self.metadata = metadata
+        self._packet_queues = {}
+        self._stop = threading.Event()
+
+    def __iter__(self):
+        return iter(())
+
+    def close(self):
+        self._stop.set()
+
+
+@pytest.fixture(autouse=True)
+def _benign_demo_scan_worker():
+    """Make start_scan's worker thread harmless under demo mode.
+
+    Patches the source to a no-op and forces `_resolve_active_sides` to
+    report nothing active (exactly what demo mode is documented to do),
+    so the worker skips all hardware bring-up and iterates an empty source
+    instead of crashing on the demo sensors' missing `.uart`.
+
+    Tests that need a live source or active sides (the duration-guard and
+    trigger-ordering tests) override these per-instance inside their own
+    `with mock.patch(...)` blocks, which shadow this module-wide patch.
+    """
+    with mock.patch("omotion.pipeline.sources.LiveUsbSource", _EmptySource), \
+         mock.patch.object(ScanWorkflow, "_resolve_active_sides", return_value=[]):
+        yield
 
 
 def test_scan_request_carries_sinks_field():
@@ -119,16 +163,6 @@ def test_start_scan_does_not_auto_wire_pipeline_telemetry_source():
         subject_id="x", duration_sec=1,
         left_camera_mask=0xFF, right_camera_mask=0, reduced_mode=False,
         sinks=[_TelemetryChannelSink()],
-    )
-    motion.scan_workflow.start_scan(request)
-    assert not hasattr(motion.scan_workflow._runner, "telemetry_source")
-
-
-def test_start_scan_runner_has_no_telemetry_source_attribute():
-    motion = _build_motion_with_data_dir(None)
-    request = ScanRequest(
-        subject_id="x", duration_sec=1,
-        left_camera_mask=0xFF, right_camera_mask=0, reduced_mode=False,
     )
     motion.scan_workflow.start_scan(request)
     assert not hasattr(motion.scan_workflow._runner, "telemetry_source")

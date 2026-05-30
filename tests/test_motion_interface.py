@@ -1,9 +1,12 @@
 """Facade-level tests for MotionInterface (the one SDK front door).
 
-All run in demo mode — no hardware. Covers: output-config constructor args,
+Most run in demo mode — no hardware. Covers: output-config constructor args,
 trigger-config resolution, lazy workflow wiring, state queries, and the
-start/stop lifecycle.
+start/stop lifecycle. The final test is hardware-gated and validates the front
+door against the real rig.
 """
+
+import re
 
 import pytest
 
@@ -120,3 +123,30 @@ def test_start_stop_lifecycle_is_clean_in_demo_mode():
     motion.start(wait=False)   # idempotent — second start is a no-op
     motion.stop()
     motion.stop()              # idempotent — second stop is a no-op
+
+
+# ---------------------------------------------------------------------------
+# Hardware-in-the-loop — the facade against the real rig
+# ---------------------------------------------------------------------------
+
+@pytest.mark.console
+@pytest.mark.sensor
+def test_facade_connects_to_full_rig(motion, console, sensor_left, sensor_right):
+    """The one front door brings the whole rig to CONNECTED and exposes live
+    device handles. The console/sensor fixtures gate on presence (this skips on
+    a partial rig); the session ``motion`` fixture's own start()/stop() is the
+    cold-start lifecycle exercise. Here we assert the aggregate state query, a
+    real version readback, and that the facade's handles ARE the connected
+    devices."""
+    c_state, l_state, r_state = motion.is_device_connected()
+    assert c_state and l_state and r_state, (
+        f"facade reports console={c_state} left={l_state} right={r_state}"
+    )
+    # The facade exposes the same handles the device fixtures resolved.
+    assert motion.console is console
+    assert motion.left is sensor_left
+    assert motion.right is sensor_right
+    # A real version string proves the UART command path is live, not just the
+    # connection-state machine.
+    version = console.get_version()
+    assert re.match(r"\d+\.\d+\.\d+", version), f"bad version: {version!r}"

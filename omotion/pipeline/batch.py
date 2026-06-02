@@ -137,40 +137,137 @@ class FrameBatch:
       Tee:             appends LiveEmit to events
     """
 
+    # ── Source fields (set by the Source that produces the batch) ────────
+
+    # (N,) int8 — camera index 0..7 within the sensor module for each row.
     cam_ids:        np.ndarray
+
+    # (N,) uint8 — raw 8-bit rolling frame counter from the camera firmware.
+    # Wraps at 256; FrameClassificationStage unwraps into abs_frame_ids.
     frame_ids:      np.ndarray
+
+    # (N, 2, 8, 1024) uint32 — raw histogram bins per frame, per side,
+    # per camera. 1024 bins from the 10-bit ADC. This is the primary input
+    # to the science pipeline. NoiseFloorStage mutates this in place.
     raw_histograms: np.ndarray
+
+    # (N, 2, 8) float32 — on-chip temperature sensor reading in °C per
+    # camera. Used for diagnostics/telemetry, not in the science path.
     temperature_c:  np.ndarray
+
+    # (N,) float64 — capture timestamp in seconds, normalized to t=0 at
+    # scan start by the source. Used for dark-interval interpolation and
+    # telemetry CSV output.
     timestamp_s:    np.ndarray
+
+    # (N,) optional float — per-frame photodiode current (PDC) from the
+    # console telemetry poller. Used for dark-correction diagnostics.
+    # None when telemetry is unavailable.
     pdc:            Optional[np.ndarray]
+
+    # (N,) optional float — TEC module temperature (TCM) from console
+    # telemetry. Diagnostic only.
     tcm:            Optional[np.ndarray]
+
+    # (N,) optional float — TEC laser temperature (TCL) from console
+    # telemetry. Diagnostic only.
     tcl:            Optional[np.ndarray]
 
-    # side_ids[i] ∈ {0, 1}: which sensor module produced row i (0=left, 1=right).
-    # Set by the source (the only place that authoritatively knows the side).
-    # Downstream stages read this directly — never infer side from the
+    # ── Source: side assignment ───────────────────────────────────────────
+
+    # (N,) int8 — which sensor module produced row i: 0 = left, 1 = right.
+    # Set by the source (the only place that authoritatively knows the
+    # side). Downstream stages read this directly — never infer side from
     # raw_histograms (a dropped/zero-filled frame would silently misroute
     # to side 0). Optional only so existing sources can be migrated
-    # incrementally and so a missing-source-side defaults to None.
+    # incrementally; a missing-source-side defaults to None.
     side_ids:       Optional[np.ndarray] = None
 
+    # ── FrameClassificationStage outputs ─────────────────────────────────
+
+    # (N,) int64 — monotonic absolute frame ID, unwrapped from the 8-bit
+    # rolling frame_ids. Used by all downstream stages to identify frames
+    # across the scan.
     abs_frame_ids:  Optional[np.ndarray] = None
+
+    # (N,) str — classification label for each frame. One of:
+    #   "stale"  — leftover from a prior scan in the USB buffer (discarded)
+    #   "warmup" — first discard_count frames while camera stabilizes
+    #   "dark"   — laser off, scheduled by firmware at dark_interval
+    #   "light"  — laser on, real measurement
     frame_type:     Optional[np.ndarray] = None
 
+    # ── MomentsStage outputs ─────────────────────────────────────────────
+
+    # (N, 2, 8) float32 — first moment of the histogram (mean pixel value
+    # in DN). Includes the sensor pedestal; use subtracted_mean or
+    # mean_dc_rt for pedestal/dark-corrected values.
     mean_raw:       Optional[np.ndarray] = None
+
+    # (N, 2, 8) float32 — standard deviation of the histogram (sqrt of
+    # variance = u2 - u1²). Raw, before any dark or shot-noise correction.
     std_raw:        Optional[np.ndarray] = None
+
+    # (N, 2, 8) float32 — raw contrast. Intentionally left None by
+    # MomentsStage because contrast requires pedestal subtraction
+    # (K = std / (mean - pedestal)). Computed downstream by BfiBviStage.
     contrast_raw:   Optional[np.ndarray] = None
 
+    # ── PedestalSubtractionStage output ──────────────────────────────────
+
+    # (N, 2, 8) float32 — mean_raw minus the per-side sensor pedestal.
+    # Can be negative (valid noise below the pedestal average). Used only
+    # for dark-frame diagnostics (ambient-light gate in CalibrationWorkflow,
+    # dark-max check in ContactQualityWorkflow) — NOT used in the BFI/BVI
+    # science path, which uses mean_dc_rt.
     subtracted_mean:   Optional[np.ndarray] = None
 
+    # ── DarkCorrectionStage outputs (realtime path) ──────────────────────
+
+    # (N, 2, 8) float32 — predicted dark baseline u1 from
+    # HybridRealtimePredictor. NaN during warmup (no dark observed yet).
     dark_baseline_rt: Optional[np.ndarray] = None
+
+    # (N, 2, 8) float32 — dark-corrected mean: mean_raw minus the
+    # predicted dark baseline. This is the realtime estimate of optical
+    # signal strength. NaN during warmup.
     mean_dc_rt:       Optional[np.ndarray] = None
+
+    # (N, 2, 8) float32 — dark-corrected std: sqrt(max(0, raw_var -
+    # predicted_dark_var)). Realtime estimate. NaN during warmup.
     std_dc_rt:        Optional[np.ndarray] = None
 
+    # ── ShotNoiseCorrectionStage outputs ─────────────────────────────────
+
+    # (N, 2, 8) float32 — std after Poisson shot-noise variance
+    # subtraction: sqrt(max(0, std_dc_rt² - adc_gain × mean × cam_gain)).
+    # The speckle-only standard deviation.
     std_sn_rt:        Optional[np.ndarray] = None
+
+    # (N, 2, 8) float32 — speckle contrast: std_sn_rt / mean_dc_rt.
+    # 0 when mean ≤ 0, NaN when mean is NaN (warmup). This is the input
+    # to the BFI calibration.
     contrast_sn_rt:   Optional[np.ndarray] = None
 
+    # ── BfiBviStage outputs ──────────────────────────────────────────────
+
+    # (N, 2, 8) float32 — Blood Flow Index from affine calibration:
+    # BFI = (1 - (contrast - c_min) / (c_max - c_min)) × 10.
+    # Nominally 0–10 scale. Used for live display; during dark frames,
+    # DarkFrameHoldStage overwrites with the last light frame's value.
     bfi_live:       Optional[np.ndarray] = None
+
+    # (N, 2, 8) float32 — Blood Volume Index from affine calibration:
+    # BVI = (1 - (mean - i_min) / (i_max - i_min)) × 10.
+    # Nominally 0–10 scale. Same hold behavior as bfi_live.
     bvi_live:       Optional[np.ndarray] = None
 
+    # ── Event queue ──────────────────────────────────────────────────────
+
+    # Accumulated events from stages during process(). The runner reads
+    # these after each batch and dispatches by type:
+    #   LiveEmit        → routed to sinks by channel name
+    #   IntervalClosed  → routed to "final" channel sinks
+    #   everything else → routed to "diagnostics" channel sinks
+    # Cleared implicitly by creating a new FrameBatch per source iteration.
     events:         list[BatchEvent] = field(default_factory=list)

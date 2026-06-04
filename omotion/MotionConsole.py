@@ -304,7 +304,7 @@ class MotionConsole(SignalWrapper):
                 r = self.uart.send_packet(
                     id=None, packetType=OW_CMD, command=OW_CMD_PING
                 )
-                if r is None or r.packet_type == OW_ERROR:
+                if r is None or r.packetType == OW_ERROR:
                     raise RuntimeError("console ping failed or returned error")
                 # `self._version` is no longer cached during CONNECTING:
                 # `get_version()` gates on `is_connected()` (which is
@@ -395,7 +395,7 @@ class MotionConsole(SignalWrapper):
             logger.info("Received Ping from Device.")
             # r.print_packet()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Error sending ping")
                 return False
             else:
@@ -595,7 +595,7 @@ class MotionConsole(SignalWrapper):
             r = self.uart.send_packet(id=None, packetType=OW_CMD, command=OW_CMD_DFU)
             self.uart.clear_buffer()
             # r.print_packet()
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Error setting DFU mode for device")
                 return False
             else:
@@ -629,7 +629,7 @@ class MotionConsole(SignalWrapper):
             r = self.uart.send_packet(id=None, packetType=OW_CMD, command=OW_CMD_RESET)
             self.uart.clear_buffer()
             # r.print_packet()
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Error resetting device")
                 return False
             else:
@@ -666,7 +666,7 @@ class MotionConsole(SignalWrapper):
             )
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Error retrieving messages from device")
                 return ""
 
@@ -727,7 +727,7 @@ class MotionConsole(SignalWrapper):
             )
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Error scanning I2C mux %d channel %d", mux_index, channel)
                 return []
 
@@ -786,7 +786,7 @@ class MotionConsole(SignalWrapper):
             self.uart.clear_buffer()
             # r.print_packet()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Error Reading I2C Device")
                 return None, None
 
@@ -842,7 +842,7 @@ class MotionConsole(SignalWrapper):
             self.uart.clear_buffer()
             # r.print_packet()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Error Writing I2C Device")
                 return False
             else:
@@ -891,7 +891,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Error setting Fan Speed")
                 return -1
 
@@ -942,7 +942,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Error reading fan %d RPM", fan_index)
                 return None
 
@@ -997,7 +997,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Error setting RGB LED state")
                 return -1
 
@@ -1037,7 +1037,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Error getting RGB LED state")
                 return -1
 
@@ -1095,7 +1095,7 @@ class MotionConsole(SignalWrapper):
             )
             self.uart.clear_buffer()
 
-            if r.packet_type != OW_ERROR and r.data_len > 0:
+            if r.packetType != OW_ERROR and r.data_len > 0:
                 # Parse response as JSON, if possible
                 try:
                     response_json = json.loads(r.data.decode("utf-8"))
@@ -1172,7 +1172,7 @@ class MotionConsole(SignalWrapper):
             )
             self.uart.clear_buffer()
             # r.print_packet()
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Error starting trigger")
                 return False
             else:
@@ -1208,7 +1208,7 @@ class MotionConsole(SignalWrapper):
             )
             self.uart.clear_buffer()
             # r.print_packet()
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Error stopping trigger")
                 return False
             else:
@@ -1244,7 +1244,7 @@ class MotionConsole(SignalWrapper):
             )
             self.uart.clear_buffer()
             # r.print_packet()
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Error retrieving FSYNC pulse count")
                 return 0
 
@@ -1287,7 +1287,7 @@ class MotionConsole(SignalWrapper):
             )
             self.uart.clear_buffer()
             # r.print_packet()
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Error retrieving LSYNC pulse count")
                 return 0
             if r.data_len == 4:
@@ -1343,7 +1343,7 @@ class MotionConsole(SignalWrapper):
                 id=None, packetType=OW_CONTROLLER, command=opcode, data=None
             )
             self.uart.clear_buffer()
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.info(
                     "%s: console NAK'd opcode 0x%02X — firmware likely predates "
                     "the odometer feature", name, opcode,
@@ -1380,7 +1380,7 @@ class MotionConsole(SignalWrapper):
                 data=bytes([target]),
             )
             self.uart.clear_buffer()
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("reset_odometer(target=%d): console returned error", target)
                 return False
             return True
@@ -1413,7 +1413,7 @@ class MotionConsole(SignalWrapper):
                 id=None, packetType=OW_CONTROLLER, command=OW_CTRL_READ_GPIO, data=None
             )
             self.uart.clear_buffer()
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 raise ValueError("Device returned an error for OW_CTRL_READ_GPIO")
             if r.data_len == 4:
                 return struct.unpack("<I", r.data)[0]
@@ -1452,7 +1452,7 @@ class MotionConsole(SignalWrapper):
                 id=None, packetType=OW_CONTROLLER, command=OW_CTRL_READ_ADC, data=None
             )
             self.uart.clear_buffer()
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 raise ValueError("Device returned an error for OW_CTRL_READ_ADC")
             if r.data_len == 4:
                 return struct.unpack("<f", r.data)[0]
@@ -1508,7 +1508,7 @@ class MotionConsole(SignalWrapper):
             )
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 raise ValueError("Device returned OW_ERROR for temperatures")
 
             if r.data_len == 0 or r.data_len % SAMPLE_SIZE != 0:
@@ -1597,7 +1597,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
             # r.print_packet()
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Error executing tec_voltage command")
                 return 0
             elif r.data_len == 4:
@@ -1646,7 +1646,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
             # r.print_packet()
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Error executing tec_adc command")
                 return 0
             elif r.data_len == 4:
@@ -1694,7 +1694,7 @@ class MotionConsole(SignalWrapper):
             r = self.uart.send_packet(
                 id=None, packetType=OW_CONTROLLER, command=OW_CTRL_TEC_STATUS, data=None
             )
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Device returned OW_ERROR for OW_CTRL_TEC_STATUS")
                 raise Exception("Error executing tec_status command")
 
@@ -1763,7 +1763,7 @@ class MotionConsole(SignalWrapper):
             )
             self.uart.clear_buffer()
             # r.print_packet()
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Error retrieving Board ID")
                 return 0
             if r.data_len == 1:
@@ -1801,7 +1801,7 @@ class MotionConsole(SignalWrapper):
             )
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.warning("get_pdc_buffer: console returned OW_ERROR")
                 return 0, []
 
@@ -1855,7 +1855,7 @@ class MotionConsole(SignalWrapper):
             )
             self.uart.clear_buffer()
             r.print_packet()
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Error retrieving PDU MON data")
                 return None
 
@@ -1964,7 +1964,7 @@ class MotionConsole(SignalWrapper):
             )
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Error reading config from device")
                 return None
 
@@ -2028,7 +2028,7 @@ class MotionConsole(SignalWrapper):
             )
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("Error writing config to device")
                 return None
 
@@ -2200,7 +2200,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("FPGA_PROG_OPEN returned ERROR")
                 raise CommandError("FPGA_PROG_OPEN failed", response=r)
 
@@ -2247,7 +2247,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("FPGA_PROG_ERASE returned ERROR")
                 raise CommandError("FPGA_PROG_ERASE failed", response=r)
 
@@ -2282,7 +2282,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("FPGA_PROG_CFG_RESET returned ERROR")
                 raise CommandError("FPGA_PROG_CFG_RESET failed", response=r)
 
@@ -2327,7 +2327,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("FPGA_PROG_CFG_WRITE_PAGE returned ERROR")
                 raise CommandError("FPGA_PROG_CFG_WRITE_PAGE failed", response=r)
 
@@ -2377,7 +2377,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("FPGA_PROG_CFG_WRITE_PAGES returned ERROR")
                 raise CommandError("FPGA_PROG_CFG_WRITE_PAGES failed", response=r)
 
@@ -2418,7 +2418,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("FPGA_PROG_CFG_READ_PAGE returned ERROR")
                 raise CommandError("FPGA_PROG_CFG_READ_PAGE failed", response=r)
 
@@ -2454,7 +2454,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("FPGA_PROG_UFM_RESET returned ERROR")
                 raise CommandError("FPGA_PROG_UFM_RESET failed", response=r)
 
@@ -2500,7 +2500,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("FPGA_PROG_UFM_WRITE_PAGE returned ERROR")
                 raise CommandError("FPGA_PROG_UFM_WRITE_PAGE failed", response=r)
 
@@ -2550,7 +2550,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("FPGA_PROG_UFM_WRITE_PAGES returned ERROR")
                 raise CommandError("FPGA_PROG_UFM_WRITE_PAGES failed", response=r)
 
@@ -2590,7 +2590,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("FPGA_PROG_UFM_READ_PAGE returned ERROR")
                 raise CommandError("FPGA_PROG_UFM_READ_PAGE failed", response=r)
 
@@ -2646,7 +2646,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("FPGA_PROG_READ_STATUS returned ERROR")
                 raise CommandError("FPGA_PROG_READ_STATUS failed", response=r)
 
@@ -2710,7 +2710,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("FPGA_PROG_FEATROW_WRITE returned ERROR")
                 raise CommandError("FPGA_PROG_FEATROW_WRITE failed", response=r)
 
@@ -2751,7 +2751,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("FPGA_PROG_FEATROW_READ returned ERROR")
                 raise CommandError("FPGA_PROG_FEATROW_READ failed", response=r)
 
@@ -2793,7 +2793,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("FPGA_PROG_SET_DONE returned ERROR")
                 raise CommandError("FPGA_PROG_SET_DONE failed", response=r)
 
@@ -2835,7 +2835,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("FPGA_PROG_REFRESH returned ERROR")
                 raise CommandError("FPGA_PROG_REFRESH failed", response=r)
 
@@ -2874,7 +2874,7 @@ class MotionConsole(SignalWrapper):
 
             self.uart.clear_buffer()
 
-            if r.packet_type == OW_ERROR:
+            if r.packetType == OW_ERROR:
                 logger.error("FPGA_PROG_CLOSE returned ERROR")
                 raise CommandError("FPGA_PROG_CLOSE failed", response=r)
 

@@ -297,7 +297,7 @@ class MotionSensor(SignalWrapper):
                     id=None, packetType=OW_CMD, command=OW_CMD_PING,
                     timeout=2.0,
                 )
-                if r is None or r.packet_type in _ERROR_TYPES:
+                if r is None or r.packetType in _ERROR_TYPES:
                     raise RuntimeError("sensor ping failed or returned error")
 
                 # Read HWID + 8 camera security UIDs. HWID failure → retry.
@@ -385,7 +385,7 @@ class MotionSensor(SignalWrapper):
         if self.demo_mode:
             return True
         r = self._send(packetType=OW_CMD, command=OW_CMD_PING)
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     def get_version(self) -> str:
         """Return the firmware version string (e.g. 'v1.2.3')."""
@@ -426,14 +426,14 @@ class MotionSensor(SignalWrapper):
         if self.demo_mode:
             return True
         r = self._send(packetType=OW_CMD, command=OW_CMD_RESET)
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     def enter_dfu(self) -> bool:
         """Reset into DFU (firmware update) mode."""
         if self.demo_mode:
             return True
         r = self._send(packetType=OW_CMD, command=OW_CMD_DFU)
-        return r.packet_type != OW_ERROR
+        return r.packetType != OW_ERROR
 
     def get_hardware_id(self) -> str | None:
         """Return the 16-byte hardware ID as a hex string, or None."""
@@ -454,7 +454,7 @@ class MotionSensor(SignalWrapper):
         r = self._send(
             packetType=OW_CONTROLLER, command=OW_CTRL_FAN_CTL, reserved=reserved
         )
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     def get_fan_control_status(self) -> bool:
         """Return True if the fan is currently ON."""
@@ -463,7 +463,7 @@ class MotionSensor(SignalWrapper):
         r = self._send(
             packetType=OW_CONTROLLER, command=OW_CTRL_FAN_CTL, reserved=0x00
         )
-        if r.packet_type in _ERROR_TYPES:
+        if r.packetType in _ERROR_TYPES:
             return False
         return r.reserved == 1
 
@@ -480,7 +480,7 @@ class MotionSensor(SignalWrapper):
             OWNotConnectedError, OWCommunicationError, OWDeviceError.
         """
         r = self._send(packetType=OW_FPGA_PROG, command=OW_FACTORY_I2C_SCAN)
-        if r.packet_type in _ERROR_TYPES:
+        if r.packetType in _ERROR_TYPES:
             return False
         addresses = list(r.data[:r.data_len]) if r.data and r.data_len else []
         logger.info("LP i2c_scan: found %d device(s): %s",
@@ -507,7 +507,7 @@ class MotionSensor(SignalWrapper):
         else:
             data = bytearray([0x01 if state else 0x00])
         r = self._send(packetType=OW_FPGA_PROG, command=OW_FACTORY_CRESET, data=data)
-        if r.packet_type in _ERROR_TYPES:
+        if r.packetType in _ERROR_TYPES:
             return False
                 
         pin = r.data[0] if r.data and r.data_len >= 1 else 0
@@ -535,7 +535,7 @@ class MotionSensor(SignalWrapper):
         payload += bytearray(data)
         
         r = self._send(packetType=OW_FPGA_PROG, command=OW_FACTORY_I2C_WR, data=payload)
-        if r.packet_type in _ERROR_TYPES:
+        if r.packetType in _ERROR_TYPES:
             return False
         
         logger.info("LP i2c_write: addr=0x%02X len=%d data=%s",
@@ -563,7 +563,7 @@ class MotionSensor(SignalWrapper):
                               read_len       & 0xFF])
         
         r = self._send(packetType=OW_FPGA_PROG, command=OW_FACTORY_I2C_RD, data=payload)
-        if r.packet_type in _ERROR_TYPES:
+        if r.packetType in _ERROR_TYPES:
             return False
         
         result = bytes(r.data[:r.data_len]) if r.data and r.data_len else b""
@@ -602,7 +602,7 @@ class MotionSensor(SignalWrapper):
         payload += bytearray(data)
         
         r = self._send(packetType=OW_FPGA_PROG, command=OW_FACTORY_I2C_WRRD, data=payload)
-        if r.packet_type in _ERROR_TYPES:
+        if r.packetType in _ERROR_TYPES:
             return False
         
         result = bytes(r.data[:r.data_len]) if r.data and r.data_len else b""
@@ -630,7 +630,7 @@ class MotionSensor(SignalWrapper):
             reserved=1,
             data=struct.pack("<I", flags),
         )
-        if r.packet_type in _ERROR_TYPES:
+        if r.packetType in _ERROR_TYPES:
             return False
         if r.data_len == 4:
             logger.debug("Debug flags set to: 0x%08X", struct.unpack("<I", r.data)[0])
@@ -641,7 +641,7 @@ class MotionSensor(SignalWrapper):
         if self.demo_mode:
             return 0
         r = self._send(packetType=OW_CMD, command=OW_CMD_DEBUG_FLAGS, reserved=0)
-        if r.packet_type in _ERROR_TYPES or r.data_len != 4:
+        if r.packetType in _ERROR_TYPES or r.data_len != 4:
             return 0
         flags = struct.unpack("<I", r.data)[0]
         logger.info("Debug flags: 0x%08X", flags)
@@ -725,7 +725,7 @@ class MotionSensor(SignalWrapper):
         if self.demo_mode:
             return True
         r = self._send(packetType=OW_FPGA, command=OW_FPGA_RESET, addr=camera_position)
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     def activate_camera_fpga(self, camera_position: int) -> bool:
         """Activate the FPGA for the camera(s) indicated by the bitmask."""
@@ -735,7 +735,7 @@ class MotionSensor(SignalWrapper):
         r = self._send(
             packetType=OW_FPGA, command=OW_FPGA_ACTIVATE, addr=camera_position
         )
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     def check_camera_fpga(self, camera_position: int) -> bool:
         """Return True if the FPGA ID check passes for the given bitmask."""
@@ -743,7 +743,7 @@ class MotionSensor(SignalWrapper):
         if self.demo_mode:
             return True
         r = self._send(packetType=OW_FPGA, command=OW_FPGA_ID, addr=camera_position)
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     def enter_sram_prog_fpga(self, camera_position: int) -> bool:
         """Enter SRAM programming mode for the FPGA(s) indicated by the bitmask."""
@@ -755,7 +755,7 @@ class MotionSensor(SignalWrapper):
             command=OW_FPGA_ENTER_SRAM_PROG,
             addr=camera_position,
         )
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     def exit_sram_prog_fpga(self, camera_position: int) -> bool:
         """Exit SRAM programming mode for the FPGA(s) indicated by the bitmask."""
@@ -767,7 +767,7 @@ class MotionSensor(SignalWrapper):
             command=OW_FPGA_EXIT_SRAM_PROG,
             addr=camera_position,
         )
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     def erase_sram_fpga(self, camera_position: int) -> bool:
         """Erase SRAM for the FPGA(s) indicated by the bitmask."""
@@ -780,7 +780,7 @@ class MotionSensor(SignalWrapper):
             addr=camera_position,
             timeout=30,
         )
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     def get_status_fpga(self, camera_position: int) -> bool:
         """Return the FPGA status for the camera(s) indicated by the bitmask."""
@@ -790,7 +790,7 @@ class MotionSensor(SignalWrapper):
         r = self._send(
             packetType=OW_FPGA, command=OW_FPGA_STATUS, addr=camera_position
         )
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     def get_usercode_fpga(self, camera_position: int) -> bool:
         """Return the FPGA usercode for the camera(s) indicated by the bitmask."""
@@ -800,7 +800,7 @@ class MotionSensor(SignalWrapper):
         r = self._send(
             packetType=OW_FPGA, command=OW_FPGA_USERCODE, addr=camera_position
         )
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     def send_bitstream_fpga(self, filename=None) -> bool:
         """Send a bitstream file to the FPGA in 1 kB blocks.
@@ -835,7 +835,7 @@ class MotionSensor(SignalWrapper):
                             reserved=1,
                             data=file_crc.to_bytes(2, byteorder="big"),
                         )
-                        if r.packet_type in _ERROR_TYPES:
+                        if r.packetType in _ERROR_TYPES:
                             logger.error("Error sending final CRC block")
                             return False
                         break
@@ -847,7 +847,7 @@ class MotionSensor(SignalWrapper):
                         reserved=0,
                         data=data,
                     )
-                    if r.packet_type in _ERROR_TYPES:
+                    if r.packetType in _ERROR_TYPES:
                         logger.error("Error sending block %d", block_count)
                         return False
 
@@ -881,7 +881,7 @@ class MotionSensor(SignalWrapper):
             reserved=1,
             timeout=60,
         )
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     # ------------------------------------------------------------------
     # Camera configuration
@@ -898,7 +898,7 @@ class MotionSensor(SignalWrapper):
             addr=camera_position,
             timeout=60,
         )
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     def camera_configure_test_pattern(
         self, camera_position: int, test_pattern: int = 0
@@ -923,7 +923,7 @@ class MotionSensor(SignalWrapper):
             data=bytearray([test_pattern]),
             timeout=60,
         )
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     def camera_capture_histogram(self, camera_position: int) -> bool:
         """Trigger a single-frame histogram capture for the given camera(s)."""
@@ -937,7 +937,7 @@ class MotionSensor(SignalWrapper):
             reserved=0,
             timeout=15,
         )
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     def camera_get_histogram(self, camera_position: int) -> bytearray | None:
         """Retrieve the last captured histogram as raw bytes.
@@ -954,7 +954,7 @@ class MotionSensor(SignalWrapper):
             addr=camera_position,
             timeout=15,
         )
-        if r.packet_type in _ERROR_TYPES:
+        if r.packetType in _ERROR_TYPES:
             return None
         logger.debug("HIST Data Len: %d", len(r.data))
         return r.data
@@ -1061,7 +1061,7 @@ class MotionSensor(SignalWrapper):
             command=OW_CAMERA_STATUS,
             addr=camera_position,
         )
-        if r.packet_type == OW_ERROR or len(r.data) != 8:
+        if r.packetType == OW_ERROR or len(r.data) != 8:
             logger.error("Error getting camera status")
             return None
         return {i: r.data[i] for i in range(8) if (camera_position >> i) & 1}
@@ -1083,10 +1083,10 @@ class MotionSensor(SignalWrapper):
             addr=camera_mask,
             timeout=8,
         )
-        if r.packet_type in _ERROR_TYPES:
+        if r.packetType in _ERROR_TYPES:
             logger.error(
-                "enable_camera_power(0x%02x) rejected by firmware: packet_type=%s",
-                camera_mask, r.packet_type,
+                "enable_camera_power(0x%02x) rejected by firmware: packetType=%s",
+                camera_mask, r.packetType,
             )
             return False
         return True
@@ -1103,10 +1103,10 @@ class MotionSensor(SignalWrapper):
             addr=camera_mask,
             timeout=8,
         )
-        if r.packet_type in _ERROR_TYPES:
+        if r.packetType in _ERROR_TYPES:
             logger.error(
-                "disable_camera_power(0x%02x) rejected by firmware: packet_type=%s",
-                camera_mask, r.packet_type,
+                "disable_camera_power(0x%02x) rejected by firmware: packetType=%s",
+                camera_mask, r.packetType,
             )
             return False
         return True
@@ -1119,7 +1119,7 @@ class MotionSensor(SignalWrapper):
             addr=0xFF,
             timeout=0.12,
         )
-        if r.packet_type in _ERROR_TYPES:
+        if r.packetType in _ERROR_TYPES:
             return [False] * 8
         power_status = [False] * 8
         if r.data and len(r.data) >= 1:
@@ -1140,7 +1140,7 @@ class MotionSensor(SignalWrapper):
             command=OW_CAMERA_READ_SECURITY_UID,
             addr=camera_id,
         )
-        if r.packet_type in _ERROR_TYPES:
+        if r.packetType in _ERROR_TYPES:
             return bytes(6)
         if r.data and len(r.data) >= 6:
             return bytes(r.data[:6])
@@ -1160,14 +1160,14 @@ class MotionSensor(SignalWrapper):
         if self.demo_mode:
             return True
         r = self._send(packetType=OW_CAMERA, command=OW_CAMERA_FSIN, reserved=1)
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     def disable_aggregator_fsin(self) -> bool:
         """Disable the internal frame-sync signal generator."""
         if self.demo_mode:
             return True
         r = self._send(packetType=OW_CAMERA, command=OW_CAMERA_FSIN, reserved=0)
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     def enable_camera(self, camera_position) -> bool:
         """Enable streaming for the camera(s) indicated by the bitmask."""
@@ -1185,7 +1185,7 @@ class MotionSensor(SignalWrapper):
             addr=camera_position,
             timeout=1.5,
         )
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     def disable_camera(self, camera_position) -> bool:
         """Disable streaming for the camera(s) indicated by the bitmask."""
@@ -1199,7 +1199,7 @@ class MotionSensor(SignalWrapper):
             addr=camera_position,
             timeout=0.3,
         )
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     def enable_camera_fsin_ext(self) -> bool:
         """Enable external frame-sync input."""
@@ -1211,7 +1211,7 @@ class MotionSensor(SignalWrapper):
             reserved=1,
             timeout=0.6,
         )
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     def disable_camera_fsin_ext(self) -> bool:
         """Disable external frame-sync input."""
@@ -1220,7 +1220,7 @@ class MotionSensor(SignalWrapper):
         r = self._send(
             packetType=OW_CAMERA, command=OW_CAMERA_FSIN_EXTERNAL, reserved=0
         )
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     def switch_camera(self, camera_id):
         """Switch the active camera mux to camera_id."""
@@ -1244,7 +1244,7 @@ class MotionSensor(SignalWrapper):
         r = self._send(
             packetType=OW_I2C_PASSTHRU, command=packet.device_address, data=data
         )
-        return r.packet_type not in _ERROR_TYPES
+        return r.packetType not in _ERROR_TYPES
 
     def camera_set_gain(self, gain, packet_id=None):
         """Set the analogue gain register on the image sensor."""

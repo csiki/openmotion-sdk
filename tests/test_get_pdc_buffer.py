@@ -12,7 +12,7 @@ def _make_console_with_uart_response(payload: bytes):
     console.uart = MagicMock()
 
     response = MagicMock()
-    response.packet_type = 0  # OW_RESP
+    response.packetType = 0  # OW_RESP
     response.data = payload
     response.data_len = len(payload)
     console.uart.send_packet.return_value = response
@@ -52,7 +52,7 @@ def test_get_pdc_buffer_parses_three_samples():
 
 def test_get_pdc_buffer_returns_empty_on_error():
     console = _make_console_with_uart_response(b"")
-    console.uart.send_packet.return_value.packet_type = OW_ERROR
+    console.uart.send_packet.return_value.packetType = OW_ERROR
     dropped, samples = console.get_pdc_buffer(max_samples=8)
     assert dropped == 0
     assert samples == []

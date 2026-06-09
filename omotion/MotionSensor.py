@@ -35,6 +35,7 @@ from omotion.config import (
     OW_FACTORY_I2C_RD,
     OW_FACTORY_I2C_WR,
     OW_FACTORY_I2C_WRRD,
+    OW_FACTORY_NVCM_CHECK,
     OW_FPGA,
     OW_FPGA_ACTIVATE,
     OW_FPGA_BITSTREAM,
@@ -610,6 +611,34 @@ class MotionSensor(SignalWrapper):
                     dev_addr, write_len, len(result),
                     [f"0x{b:02X}" for b in result])
         return result
+
+    def nvcm_check(self, isc_operand: int = 0x08, num_rows: int = 1) -> bytes:
+        """Probe the active camera's CrossLink NVCM state (read-back, no boot).
+
+        Holds the FPGA config port in slave mode and reads every NVCM
+        discriminator over I2C without booting the FPGA or touching camera
+        power.  Select the camera first with switch_camera() and make sure it
+        is powered.
+
+        Args:
+            isc_operand: ISC_ENABLE operand1 — 0x08 = NVCM access (default),
+                         0x00 = SRAM access.
+            num_rows:    Number of 16-byte NVCM array rows to read back (0-8).
+
+        Returns:
+            Raw fixed-layout response blob (see scripts/nvcm_probe.py for the
+            field layout), or b"" on error.
+        """
+        payload = bytearray([isc_operand & 0xFF, num_rows & 0xFF])
+        r = self._send(packetType=OW_FPGA_PROG,
+                       command=OW_FACTORY_NVCM_CHECK,
+                       data=payload,
+                       timeout=8)
+        if r.packetType in _ERROR_TYPES:
+            logger.error("nvcm_check: firmware returned error type 0x%02X",
+                         r.packetType)
+            return b""
+        return bytes(r.data[:r.data_len]) if r.data and r.data_len else b""
 
     # ------------------------------------------------------------------
     # Debug flags

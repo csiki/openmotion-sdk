@@ -17,10 +17,12 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Callable, Optional
 
+from omotion import _log_root
 from omotion.i2c_parser import I2CDriver, isp_entry_point, ERR_MESSAGES
 from omotion.MotionSensor import _ERROR_TYPES
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(
+    f"{_log_root}.NvcmProgrammer" if _log_root else "NvcmProgrammer")
 
 _NVCM_DIR = Path(__file__).resolve().parent / "nvcm"
 DEFAULT_ALGO_PATH = _NVCM_DIR / "impl1_algo.iea"

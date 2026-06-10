@@ -262,16 +262,20 @@ class NvcmProgrammer:
 
         # Deterministic sim pre-pass: exact transaction total for progress,
         # and a file sanity check before touching hardware.
-        sim = _CountingSimDriver()
-        ret = isp_entry_point(algo, data, driver=sim)
-        if ret < 0:
-            msg = ERR_MESSAGES.get(ret, f"error {ret}")
-            return NvcmResult(False, f"image pre-check failed: {msg}", 0)
-        total = sim.count
+        try:
+            sim = _CountingSimDriver()
+            ret = isp_entry_point(algo, data, driver=sim)
+            if ret < 0:
+                msg = ERR_MESSAGES.get(ret, f"error {ret}")
+                return NvcmResult(False, f"image pre-check failed: {msg}", 0)
+            total = sim.count
 
-        # Power the target camera and route the mux.
-        if not self._sensor.enable_camera_power(1 << (camera - 1)):
-            return NvcmResult(False, "failed to power camera", 0)
+            # Power the target camera and route the mux.
+            if not self._sensor.enable_camera_power(1 << (camera - 1)):
+                return NvcmResult(False, "failed to power camera", 0)
+        except Exception as exc:  # disconnected sensor, corrupt image, ...
+            logger.exception("NVCM burn pre-flight failed for camera %d", camera)
+            return NvcmResult(False, str(exc), 0)
         time.sleep(0.5)
 
         driver = _SensorI2CDriver(self._sensor, total=total,

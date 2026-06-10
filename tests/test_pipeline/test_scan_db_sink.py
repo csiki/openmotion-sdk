@@ -59,9 +59,9 @@ def test_scan_db_sink_creates_session_at_scan_start(tmp_path):
 
 def test_scan_db_sink_channels_attribute():
     sink = ScanDBSink(db_path=":memory:")
-    # Final-branch record only. Live values reach the GUI via channels;
-    # raw histograms live in the CSVs written from Tee("raw").
-    assert sink.channels == {"final"}
+    # Final-branch record + integrity-diagnostics summary. Live values reach
+    # the GUI via channels; raw histograms live in the CSVs from Tee("raw").
+    assert sink.channels == {"final", "diagnostics"}
 
 
 def test_scan_db_sink_stamps_session_meta(tmp_path):

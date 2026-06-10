@@ -1,6 +1,6 @@
 # Open-Motion Science Pipeline — Technical Reference
 
-**Implementation:** `omotion/pipeline/` — a stage-based, channel-dispatched pipeline package. The entry point is `omotion.pipeline.factory.default_pipeline()`, which composes the canonical chain of stages used by every live scan, CSV replay, and DB replay.
+**Implementation:** `omotion/pipeline/` — a stage-based, channel-dispatched pipeline package. The entry point is `omotion.pipeline.factory.default_pipeline()`, which composes the canonical chain of stages used by every live scan and CSV replay.
 
 **Audience:**
 
@@ -15,20 +15,12 @@
 A scan is driven by a `ScanRunner` (`omotion/pipeline/runner.py`). It pulls `FrameBatch` objects from a `Source`, passes each batch through a `Pipeline` of `Stage`s, and dispatches the resulting events to subscribed `Sink`s on named channels.
 
 ```
-                                 ┌──────────────────────────────┐
-                                 │      ConsoleTelemetrySource  │
-                                 │      (~10 Hz snapshots)      │
-                                 └──────────────┬───────────────┘
-                                                │  TelemetryEvent
-                                                │  (separate runner thread)
-                                                ▼
 ┌────────────┐   FrameBatch  ┌─────────────────────────────────────────┐
 │   Source   ├──────────────►│           Pipeline (Stage list)         │
-│ (live USB, │  N frames per │ Parse → Classify → TelemetryIngest →    │
-│ CSV, DB)   │  batch        │ Tee(raw) → NoiseFloor → Moments →       │
-└────────────┘               │ PedestalSub → DarkCorrection →          │
-                             │ ShotNoise → BfiBvi → SideAvg →          │
-                             │ Tee(live)                               │
+│ (live USB, │  N frames per │ Classify → Tee(raw) → TimestampRepair → │
+│ CSV)       │  batch        │ NoiseFloor → Moments → PedestalSub →    │
+└────────────┘               │ DarkCorrection → ShotNoise → BfiBvi →   │
+                             │ DarkFrameHold → SideAvg → Tee(live)     │
                              └──────────────┬──────────────────────────┘
                                             │ batch.events (LiveEmit /
                                             │ IntervalClosed / diagnostics)
@@ -36,15 +28,19 @@ A scan is driven by a `ScanRunner` (`omotion/pipeline/runner.py`). It pulls `Fra
                               ┌──────────────────────────┐
                               │       ScanRunner         │
                               │  channel-based dispatch  │
-                              └─┬─────┬─────┬─────┬─────┘
-                                │     │     │     │
-                              raw  live  final telemetry  diagnostics
-                                │     │     │     │
-                                ▼     ▼     ▼     ▼
+                              └─┬─────┬──────┬─────┬────┘
+                                │     │      │     │
+                              raw  live(_side) final diagnostics
+                                │     │      │     │
+                                ▼     ▼      ▼     ▼
                                   Sinks (CsvSink, ScanDBSink,
-                                  TelemetrySink, app live/final
-                                  plot sinks, …)
+                                  DiagnosticsLogSink, app
+                                  live/final plot sinks, …)
 ```
+
+(Console telemetry is currently handled *outside* the pipeline: a listener on
+the legacy `ConsoleTelemetryPoller` thread writes the per-scan telemetry CSV —
+see §9. The per-frame telemetry fields on `FrameBatch` are reserved.)
 
 The pipeline is **pure transformation**: stages mutate a typed `FrameBatch` dataclass in place and append events to `batch.events`. They never perform I/O. All side effects — file writes, UI emission, DB inserts — happen in sinks downstream of the runner.
 
@@ -69,15 +65,15 @@ Three things characterise this design and make it auditable:
 | `raw_histograms` | `(N, 2, 8, 1024)` uint32 | Source (parse) | Raw 1024-bin histogram per side × cam; mutated in place by NoiseFloorStage |
 | `temperature_c` | `(N, 2, 8)` float32 | Source (parse) | Sensor-reported temperature |
 | `timestamp_s` | `(N,)` float64 | Source (parse) | Sensor timestamp; normalised to scan start by `_BaseSource` |
-| `pdc` | `(N,)` float32 \| None | TelemetryIngestStage | Mean PDC reading (mA) at the frame's timestamp |
-| `tcm` | `(N,)` int64 \| None | TelemetryIngestStage | MCU trigger counter (lsync pulses) |
-| `tcl` | `(N,)` int64 \| None | TelemetryIngestStage | Laser trigger counter |
+| `pdc` | `(N,)` float32 \| None | **Reserved** (always None today) | Mean PDC reading (mA) at the frame's timestamp — per-frame telemetry stamping was removed and is planned to return (§9) |
+| `tcm` | `(N,)` int64 \| None | **Reserved** (always None today) | MCU trigger counter (lsync pulses) |
+| `tcl` | `(N,)` int64 \| None | **Reserved** (always None today) | Laser trigger counter |
 | `abs_frame_ids` | `(N,)` int64 | FrameClassificationStage | Monotonic unwrapped frame counter |
 | `frame_type` | `(N,)` `<U8` | FrameClassificationStage | One of `"warmup"`, `"dark"`, `"light"`, `"stale"` |
 | `mean_raw` | `(N, 2, 8)` float32 | MomentsStage | First moment μ₁ of raw histogram (NaN where count == 0) |
 | `std_raw` | `(N, 2, 8)` float32 | MomentsStage | √(μ₂ − μ₁²) of raw histogram |
 | `contrast_raw` | always `None` | MomentsStage | Reserved; pedestal-subtracted contrast is computed downstream |
-| `display_mean` | `(N, 2, 8)` float32 | PedestalSubtractionStage | `max(0, mean_raw − pedestal)` |
+| `subtracted_mean` | `(N, 2, 8)` float32 | PedestalSubtractionStage | `max(0, mean_raw − pedestal)` |
 | `dark_baseline_rt` | `(N, 2, 8)` float32 | DarkCorrectionStage | Realtime-predicted dark baseline û₁ (NaN before first dark) |
 | `mean_dc_rt` | `(N, 2, 8)` float32 | DarkCorrectionStage | `mean_raw − û₁` (best-effort dark-subtracted mean) |
 | `std_dc_rt` | `(N, 2, 8)` float32 | DarkCorrectionStage | √(std_raw² − σ̂²) (best-effort dark-subtracted std) |
@@ -97,7 +93,9 @@ Stages produce events when something doesn't fit cleanly into per-frame arrays. 
 | `IntervalClosed(corrected_batch)` | `DarkCorrectionStage` (per-camera; enriched + stencilled downstream), `SideAverageStage` (reduced-mode `cam_id=-1` side averages) | `"final"` channel sinks |
 | `DarkIntegrityWarning(...)` | `DarkIntegrityGuard` (inside DarkCorrectionStage) | `"diagnostics"` |
 | `StencilFallback(...)` | `DarkFrameQuadraticStencil` (inside DarkFrameHoldStage) | `"diagnostics"` |
-| `TelemetryEvent(...)` | `ConsoleTelemetrySource` (out of band) | `"telemetry"` and `TelemetryAggregator` |
+| `PipelineError(...)` | `ScanRunner` (a stage raised; the batch was dropped, state preserved) | `"diagnostics"` |
+| `TerminalDarkResult(...)` | `DarkCorrectionStage.on_scan_stop` | `"diagnostics"` |
+| `TriggerStateEvent(...)` | `ScanWorkflow` (out of band, via `ScanRunner.dispatch_event`) | `"diagnostics"` |
 
 ---
 
@@ -121,8 +119,7 @@ The full chain assembled by `default_pipeline()` is:
 
 ```
 FrameClassificationStage
-TelemetryIngestStage
-Tee("raw", filter=ft != "stale", max_duration_s=…)   # conditional
+Tee("raw", emit_if_any=ft != "stale", max_duration_s=…)   # conditional
 TimestampRepairStage
 NoiseFloorStage
 MomentsStage
@@ -183,27 +180,25 @@ A `delta > 128` (apparent large backward jump) is treated as a packet anomaly an
 
 Under the defaults, dark frames occur at `n = 10, 601, 1201, 1801, …`. Every other frame with `n > d` is `"light"`.
 
-### 5.2 TelemetryIngestStage
+### 5.2 Per-frame telemetry — RESERVED (not currently in the pipeline)
 
-**File:** `omotion/pipeline/telemetry.py`. **Writes:** `pdc`, `tcm`, `tcl`.
+There is no telemetry stage today. A `TelemetryIngestStage` that stamped each
+frame with `pdc`/`tcm`/`tcl` from a `TelemetryAggregator` existed and was
+removed (commit `9a2d8e0`, "drop telemetry stage/source/sink for now"); it is
+**planned to return**. Until then:
 
-Reads the most recent `TelemetryEvent` (timestamp ≤ frame timestamp) from the pipeline's `TelemetryAggregator` and stamps each frame with:
-
-- `pdc[i]` = mean of `event.pdc_samples` (in mA) — a per-frame scalar best representing laser power over the frame's exposure
-- `tcm[i]` = MCU trigger counter
-- `tcl[i]` = laser trigger counter
-
-When no telemetry has been observed yet, fields remain `np.nan` / 0. When the pipeline is constructed without an aggregator (e.g. tests, replay sources without telemetry), the stage is a no-op.
-
-`reset()` deliberately does **not** clear the aggregator — telemetry history is owned by the source and must outlive any transient pipeline exception. See §10.
+- `FrameBatch.pdc` / `tcm` / `tcl` are always `None`.
+- The raw CSV's `tcm,tcl,pdc` columns are always blank (the schema keeps them
+  so old and new files stay column-compatible).
+- The per-scan telemetry CSV is written *outside* the pipeline — see §9.
 
 ### 5.3 Tee("raw")
 
 **File:** `omotion/pipeline/tee.py`. **Writes:** appends `LiveEmit(channel="raw", payload=batch)`.
 
-Positional marker. Routes the full FrameBatch — including warmup frames — to any sink subscribed to `"raw"` (e.g. `CsvSink`, `ScanDBSink`). Two predicates can suppress emission:
+Positional marker. Routes the full FrameBatch — including warmup frames — to any sink subscribed to `"raw"` (e.g. `CsvSink`). Two gates can suppress emission:
 
-- `filter=lambda ft: ft != "stale"` — never emit batches whose every frame is stale
+- `emit_if_any=lambda ft: ft != "stale"` — never emit batches whose every frame is stale. **This is a batch-level gate, not a row filter**: if any frame passes, the whole batch (stale rows included) is emitted, and sinks do per-row filtering via `FrameBatch.iter_rows(exclude=...)`.
 - `max_duration_s` — once the batch's first timestamp exceeds this cap, no further raw emission (used to bound raw-CSV file size on long clinical scans)
 
 If `raw_save_max_duration_s=0` is passed to `default_pipeline()`, the raw tee is omitted entirely.
@@ -242,15 +237,15 @@ std_raw    = σ
 
 ### 5.6 PedestalSubtractionStage
 
-**File:** `omotion/pipeline/stages/pedestal_sub.py`. **Writes:** `display_mean`.
+**File:** `omotion/pipeline/stages/pedestal_sub.py`. **Writes:** `subtracted_mean`.
 
 Per-side pedestal subtraction with a clamp at zero:
 
 ```
-display_mean = max(0, mean_raw − pedestal)        # per-side broadcast (1, 2, 1)
+subtracted_mean = max(0, mean_raw − pedestal)        # per-side broadcast (1, 2, 1)
 ```
 
-`display_mean` is the right quantity for measuring **ambient light on a dark frame** — its baseline is the zero-light pedestal, so any non-zero value is stray light leaking onto the sensor. `ContactQualityWorkflow` reads it that way for its AMBIENT_LIGHT threshold on dark frames (§11.2). For light frames, the right "intensity" quantity is `mean_dc_rt` (mean above the just-measured dark baseline, not above pedestal) — the live UI emits it, and `_ContactQualitySink` reads it for the POOR_CONTACT threshold. The dark-correction path uses `mean_raw` (un-pedestal-subtracted) directly, because the pedestal cancels exactly when you subtract one dark mean from one light mean — both terms carry the same pedestal.
+`subtracted_mean` is the right quantity for measuring **ambient light on a dark frame** — its baseline is the zero-light pedestal, so any non-zero value is stray light leaking onto the sensor. `ContactQualityWorkflow` reads it that way for its AMBIENT_LIGHT threshold on dark frames (§11.2). For light frames, the right "intensity" quantity is `mean_dc_rt` (mean above the just-measured dark baseline, not above pedestal) — the live UI emits it, and `_ContactQualitySink` reads it for the POOR_CONTACT threshold. The dark-correction path uses `mean_raw` (un-pedestal-subtracted) directly, because the pedestal cancels exactly when you subtract one dark mean from one light mean — both terms carry the same pedestal.
 
 ### 5.7 DarkCorrectionStage
 
@@ -474,8 +469,10 @@ Sinks subscribe to channels by declaring a `channels: set[str]` attribute. The r
 | `"live"` | `FrameBatch` (excluding warmup/stale) | Per batch | `Tee("live")` | bloodflow-app `_LivePlotSink` (realtime per-frame plot — later overwritten by `"final"` corrections, see §8.3), `ContactQualityWorkflow._ContactQualitySink` (DN thresholding), `CalibrationWorkflow._CalibrationCollectorSink` (dark frames) |
 | `"live_side"` | `SideAverageSample` | Per capture per side (reduced mode only) | `SideAverageStage` (realtime path) | bloodflow-app `_LivePlotSink` (reduced-mode live trace) |
 | `"final"` | `EnrichedCorrectedInterval` | Per closed dark interval (~1 per `dark_interval/40` seconds; default ~15 s) | `IntervalClosed` from `DarkCorrectionStage` (per-camera; enriched + stencilled by downstream stages) and `SideAverageStage` (reduced-mode `cam_id=-1` side averages) | `CsvSink` (corrected CSV), `ScanDBSink` (`session_data` — the DB's only science record), bloodflow-app `_FinalBatchSink` (overwrites the realtime points plotted from `"live"` with interval-corrected BFI/BVI/mean/contrast), `CalibrationWorkflow` (corrected light samples) |
-| `"telemetry"` | `TelemetryEvent` | ~10 Hz (independent of frame cadence) | `ConsoleTelemetrySource` (separate runner thread) | `TelemetrySink` (CSV) plus the pipeline's `TelemetryAggregator` |
-| `"diagnostics"` | `DarkIntegrityWarning`, `StencilFallback`, future events | As they occur | Stages append to `batch.events` | Any sink subscribing to `"diagnostics"` |
+| `"diagnostics"` | `DarkIntegrityWarning`, `StencilFallback`, `TerminalDarkResult`, `PipelineError`, `TriggerStateEvent` | As they occur | Stages append to `batch.events`; the runner also routes out-of-band events here | `DiagnosticsLogSink` (always injected — WARNING logs + scan-end summary), `ScanDBSink` (integrity summary → `session_meta`), bloodflow-app `_TriggerStateSink` |
+
+(There is no `"telemetry"` channel today — console telemetry is written by a
+poller listener outside the pipeline; see §9.)
 
 The runner is fail-soft: if a sink raises during `consume()`, the exception is logged and the next sink is invoked — one broken sink does not break the run.
 
@@ -493,7 +490,7 @@ class Source(Protocol):
     def close(self) -> None: ...
 ```
 
-The runner consumes `for batch in source`, so any object that yields `FrameBatch`es is a valid source. The package ships three concrete sources plus the out-of-band telemetry source.
+The runner consumes `for batch in source`, so any object that yields `FrameBatch`es is a valid source. The package ships two concrete sources.
 
 ### 7.1 LiveUsbSource
 
@@ -516,20 +513,7 @@ Replays a raw-histogram CSV produced by `CsvSink` (one CSV per side, optionally 
 
 The metadata to attach is the caller's responsibility — replay sources don't know the original scan's `scan_id` / `subject_id` / camera masks.
 
-### 7.3 ConsoleTelemetrySource
-
-**Used by:** every live scan (auto-wired when a sink subscribes to `"telemetry"`).
-
-Polls `MotionConsole.telemetry.get_snapshot()` at fixed cadence (default 10 Hz). Each snapshot is converted via `omotion.console_telemetry_conversions.tec_thermistor_voltage_to_celsius` and emitted as a `TelemetryEvent` with `timestamp_s` normalised to the first snapshot's clock.
-
-Runs on a dedicated thread inside `ScanRunner._telemetry_loop`. Events flow to two destinations in parallel:
-
-- `TelemetryAggregator.update(event)` — for per-frame telemetry ingest (§5.2)
-- All sinks subscribing to `"telemetry"` — for direct telemetry-CSV writing
-
-The aggregator and the telemetry sinks are independent; clearing one does not clear the other.
-
-### 7.4 ScanMetadata
+### 7.3 ScanMetadata
 
 `ScanMetadata` (in `omotion/pipeline/sinks.py`) is the immutable per-scan handle every sink receives at `on_scan_start`:
 
@@ -569,7 +553,7 @@ The runner calls `on_scan_start(metadata)` on every sink before the first batch,
 
 Writes the two legacy CSV families. File creation is lazy on first `consume()`.
 
-- **Raw CSV** — one file per side, named `{scan_id}_{subject_id}_{side}_mask{XX}_raw.csv`. Schema: `cam_id, frame_id, timestamp_s, type, 0..1023, temperature, sum, tcm, tcl, pdc`. Each frame's `type` column is the `frame_type` written by FrameClassificationStage (`"warmup" | "dark" | "light" | "stale"`). Telemetry columns (`tcm`, `tcl`, `pdc`) are blank when no telemetry snapshot was available for that frame's timestamp (NaN → empty cell — `_scalar_or_blank`).
+- **Raw CSV** — one file per side, named `{scan_id}_{subject_id}_{side}_mask{XX}_raw.csv`. Schema: `cam_id, frame_id, timestamp_s, type, 0..1023, temperature, sum, tcm, tcl, pdc`. Each frame's `type` column is the `frame_type` written by FrameClassificationStage (`"warmup" | "dark" | "light" | "stale"`). Telemetry columns (`tcm`, `tcl`, `pdc`) are **always blank today** — per-frame telemetry stamping is reserved (§5.2/§9); the columns stay so old and new files are column-compatible.
 - **Corrected CSV** — one file per scan, named `{scan_id}_corrected.csv`.
   - **Normal mode** (82 columns): `frame_id, timestamp_s, {bfi,bvi,mean,contrast,temp}_{l,r}{1..8}`. Per-frame rows are accumulated in `_corrected_acc` until every expected `(side, cam)` slot has contributed a `mean`; only then is the row written.
   - **Reduced mode** (6 columns): `frame_id, timestamp_s, bfi_left, bfi_right, bvi_left, bvi_right`. Each `EnrichedCorrectedFrame` writes into the row's `bfi_{side}`/`bvi_{side}` slot based on `frame.side`; a row is flushed once both expected sides have contributed (or only one, if the other's camera mask is zero).
@@ -602,11 +586,11 @@ The plot widget uses a **two-pass refinement pattern** for BFI, BVI, mean, and c
 
 The SDK itself ships no UI sink — only the bloodflow-app wires PyQt6 signals to QML.
 
-### 8.4 TelemetrySink
+### 8.4 DiagnosticsLogSink
 
-**Channels:** `{"telemetry"}`.
+**Channels:** `{"diagnostics"}`. **Always injected** by `ScanWorkflow` (independent of storage flags).
 
-Writes one CSV row per `TelemetryEvent` with columns `timestamp_s, pdc_samples_ma, tec_setpoint_c, tec_actual_c, tec_setpoint_raw, tec_actual_raw, tcm, tcl, safety_status`.
+Logs every integrity event at WARNING — `DarkIntegrityWarning` (laser apparently on during a dark frame), `TerminalDarkResult(found=False)` (terminal interval lost), `StencilFallback`, `PipelineError` (a batch was dropped) — and emits a per-type count summary at scan end. Routine events (`TriggerStateEvent`, successful `TerminalDarkResult`) are ignored. `ScanDBSink` independently writes the same summary (count + first/last frame per type) into the session's `session_meta["diagnostics"]`, so the DB record itself shows whether a scan had integrity problems.
 
 ### 8.5 Writing your own sink
 
@@ -640,15 +624,25 @@ Sink-authoring rules:
 
 ---
 
-## 9. Telemetry
+## 9. Telemetry — current state and reservation
 
-`omotion/pipeline/telemetry.py` provides the two halves of the telemetry subsystem.
+**Per-frame telemetry stamping is currently absent from the pipeline.** The
+`TelemetryIngestStage` / `TelemetryAggregator` / `ConsoleTelemetrySource` /
+`TelemetrySink` subsystem was removed in commit `9a2d8e0` ("drop telemetry
+stage/source/sink for now") and is **planned to return**. The reserved
+surface that remains:
 
-**`TelemetryAggregator`** — thread-safe ring buffer (default 100 events). Exposes `update(event)` (called from the runner's telemetry thread) and `snapshot_at(t)` (called from the pipeline thread by `TelemetryIngestStage`, returns the most recent event with `timestamp_s <= t`).
+- `FrameBatch.pdc` / `tcm` / `tcl` fields — always `None`.
+- The raw CSV's `tcm,tcl,pdc` columns — always blank.
 
-**`TelemetryIngestStage`** — placed early in the pipeline (after FrameClassificationStage). For each frame in the batch, queries the aggregator and populates `batch.pdc`, `batch.tcm`, `batch.tcl`. Does **not** clear the aggregator on `reset()` — telemetry history is owned by the source and must outlive any transient pipeline exception that triggers a mid-scan reset.
-
-The two-thread design (telemetry on its own thread, frames on the pipeline thread) means telemetry is best-effort per-frame: a frame whose timestamp arrives before any telemetry snapshot has been published gets `pdc = NaN`, `tcm = tcl = 0`. The CSV writers translate NaN to blank cells; the DB writer translates NaN to 0.0 (the schema is NOT NULL today; future relaxation tracked in [`ConsoleTelemetry.md`](ConsoleTelemetry.md)).
+What runs today instead: `ScanWorkflow` registers a `_TelemetryCsvWriter`
+listener on the legacy `ConsoleTelemetryPoller` daemon thread for the
+duration of each scan, writing one row per ~10 Hz snapshot to
+`{scan_id}_{subject_id}_telemetry.csv` (columns: `timestamp_s,
+pdc_samples_ma, tec_setpoint_c, tec_actual_c, tec_setpoint_raw,
+tec_actual_raw, tcm, tcl, safety_status`). This path bypasses the pipeline
+entirely — it is not a pipeline sink and has no channel. See
+[`ConsoleTelemetry.md`](ConsoleTelemetry.md) for the poller itself.
 
 ---
 
@@ -657,12 +651,12 @@ The two-thread design (telemetry on its own thread, frames on the pipeline threa
 | Thread | Owner | Lifecycle | Purpose |
 |---|---|---|---|
 | `LiveUsbSource-{left,right}` | `LiveUsbSource` | per scan, daemon | Per-side packet parsing → FrameBatch → shared batch queue |
-| `ScanRunner-telemetry` | `ScanRunner` | per scan, daemon | Pull `TelemetryEvent`s from `ConsoleTelemetrySource`, update aggregator, dispatch to `"telemetry"` sinks |
+| `ConsoleTelemetryPoller` | `MotionConsole.telemetry` | long-lived, daemon | ~10 Hz console telemetry snapshots; `_TelemetryCsvWriter` listener writes the per-scan telemetry CSV (outside the pipeline, §9) |
 | Runner thread (`ScanWorkflow._worker`) | `ScanWorkflow` | per scan, non-daemon | Iterate the source, call `pipeline.process(batch)`, dispatch events to sinks |
 
-The pipeline stages and most sinks run **on the runner thread**. `TelemetryAggregator.update` and `TelemetryAggregator.snapshot_at` are the only cross-thread interaction inside the pipeline; both are guarded by `self._lock`.
+The pipeline stages and all pipeline sinks run **on the runner thread** — there is no cross-thread interaction inside the pipeline itself.
 
-`Pipeline.reset()` is called by the runner at scan start and whenever any stage raises during a scan; the run continues with the next batch from the source. This makes a single bad batch survivable without dropping the whole scan.
+If any stage raises mid-scan, the runner **drops that batch and preserves all stage state** (emitting a `PipelineError` on the `"diagnostics"` channel), then continues with the next batch. Stage state is deliberately NOT reset: clearing the frame unwrappers would re-trip the stale-first guard (§5.1) and permanently misalign the positional dark schedule. The gap left by a dropped batch is the same shape as USB packet loss, which every stage already tolerates. `Pipeline.reset()` is for scan start / replay reuse only.
 
 ---
 
@@ -675,7 +669,7 @@ Two SDK-internal consumers illustrate the pattern.
 `omotion/CalibrationWorkflow.py` defines `_CalibrationCollectorSink` with `channels = {"final", "live"}`:
 
 - On `"final"` (each `EnrichedCorrectedInterval` from DarkCorrectionStage), the sink slices each `EnrichedCorrectedFrame` into a legacy `Sample`-shaped object (`mean`, `std_dev`, `contrast`, `bfi`, `bvi`, `is_corrected=True`). These feed `_compute_calibration_from_samples` to produce the per-camera `(2, 8)` calibration arrays.
-- On `"live"` (each FrameBatch), the sink picks out rows where `frame_type == "dark"` and emits a `Sample` whose `mean` is `display_mean` (i.e. `max(0, mean_raw − pedestal)`) — the legacy "u1 − PEDESTAL_HEIGHT" semantics used by the ambient-light gate.
+- On `"live"` (each FrameBatch), the sink picks out rows where `frame_type == "dark"` and emits a `Sample` whose `mean` is `subtracted_mean` (i.e. `max(0, mean_raw − pedestal)`) — the legacy "u1 − PEDESTAL_HEIGHT" semantics used by the ambient-light gate.
 
 After the scan, the workflow drains the sink's `corrected_samples` and `dark_samples` and applies the existing frame-id windowing on the lights (skip-leading + `frame_window_count` cap), then either uploads the resulting calibration to the console EEPROM or returns it for inspection.
 
@@ -683,7 +677,7 @@ After the scan, the workflow drains the sink's `corrected_samples` and `dark_sam
 
 `omotion/ContactQualityWorkflow.py` defines `_ContactQualitySink` with `channels = {"live"}`. For each FrameBatch, it reads **two different DN-scale signals depending on frame type**:
 
-- For `frame_type == "dark"` rows, tracks the per-camera maximum `display_mean` (= `max(0, mean_raw − pedestal)`). Baseline is the zero-light pedestal; this measures ambient light leaking onto the sensor — the right quantity for the **AMBIENT_LIGHT** gate.
+- For `frame_type == "dark"` rows, tracks the per-camera maximum `subtracted_mean` (= `max(0, mean_raw − pedestal)`). Baseline is the zero-light pedestal; this measures ambient light leaking onto the sensor — the right quantity for the **AMBIENT_LIGHT** gate.
 - For all other non-warmup/non-stale rows (light frames), maintains a per-camera rolling deque (default 10 samples) of `mean_dc_rt` (= `mean_raw − predicted_dark_baseline`). Baseline is the just-measured dark, not the pedestal; this measures actual laser-driven signal strength — the right quantity for the **POOR_CONTACT** gate. Early light frames before the first dark observation have `mean_dc_rt = NaN` (predictor returned `None`) and are skipped; the window fills up once the first dark lands.
 
 After the scan, `result()` evaluates per camera: `no_signal` if no light samples were collected, `ambient_light` if the dark-frame max exceeds the per-cam dark threshold, `poor_contact` if the rolling light average falls below the per-cam light threshold, else `ok`. The verdict is rolled up into `ContactQualityResult.passed`.
@@ -710,7 +704,6 @@ Both consumers are pure sinks — they add no pipeline stages, do not modify Fra
 | `_FRAME_ROLLOVER_THRESHOLD` | 128 | `FrameClassificationStage` | Max forward delta before rollover is detected |
 | `batch_size_frames` | 10 (live) / 100 (replay) | `LiveUsbSource` / `CsvReplaySource` | N frames per FrameBatch |
 | `flush_interval_s` | 0.25 | `LiveUsbSource` | Time-based flush so partial batches don't stall the live UI |
-| `poll_interval_s` | 0.1 | `ConsoleTelemetrySource` | Telemetry polling cadence (~10 Hz) |
 
 ---
 
@@ -758,4 +751,3 @@ class EnrichedCorrectedInterval:
 
 The `"final"` channel always carries `EnrichedCorrectedInterval` (the enrichment path runs whenever calibration is available, which is the case in every production build of `default_pipeline()`). `CorrectedInterval` would be emitted only by a pipeline configured without `adc_gain`/`camera_gain_map`/`calibration`, which the factory never produces in normal use.
 
-`TelemetryEvent` (in `omotion/pipeline/batch.py`) carries the per-snapshot console telemetry; `"_c"` fields are degrees Celsius (converted by `omotion.console_telemetry_conversions`), `"_raw"` fields are the original ADC counts.

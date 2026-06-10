@@ -22,6 +22,10 @@ from omotion.pipeline.sinks import CsvSink, ScanMetadata
 from omotion.pipeline.sources import CsvReplaySource
 
 
+# Full-scan replays run for minutes; the project-wide 30 s pytest timeout
+# (pyproject.toml) would kill every test here without this override.
+pytestmark = pytest.mark.timeout(900)
+
 SCANS_DIR = Path(r"C:\Users\ethan\Projects\eft-testing\scans")
 FINAL_TESTS_DIR = Path(
     r"C:\Users\ethan\Projects\eft-testing\final_tests-20260603T234709Z-3-001\final_tests"

@@ -117,12 +117,6 @@ def _scalar_or_blank(arr, i):
     return v
 
 
-def _batch_frame_type(batch, i: int) -> str:
-    if getattr(batch, "frame_type", None) is None:
-        return ""
-    return str(batch.frame_type[i])
-
-
 def _source_side_indices(batch, i: int, cam_id: int, meta: ScanMetadata):
     """Yield the active source side(s) for one raw row.
 
@@ -211,6 +205,7 @@ class CsvSink:
         self._corrected_n_cols: int = 0
         self._corrected_reduced: bool = False
         self._next_flush_id: Optional[int] = None
+        self._corrected_rows_since_flush: int = 0
         self._expected_cams: "dict[str, set[int]]" = {}  # side -> set of cam_ids
 
     def on_scan_start(self, meta: ScanMetadata) -> None:
@@ -280,22 +275,20 @@ class CsvSink:
             return
 
         import numpy as np
-        from .batch import FrameBatch
 
-        n = len(batch.cam_ids)
-        for i in range(n):
-            cam_id = int(batch.cam_ids[i])
+        # Tee("raw")'s gate is batch-level, so stale rows (leftover packets
+        # from a previous scan) can still arrive here; iter_rows skips them.
+        if batch.frame_type is not None:
+            n_stale = int(np.sum(batch.frame_type == "stale"))
+            if n_stale:
+                logger.warning(
+                    "stale raw frame skipped x%d (leftover packets from a "
+                    "previous scan)", n_stale,
+                )
+
+        for i, _side_idx, cam_id, frame_type in batch.iter_rows(exclude={"stale"}):
             frame_id = int(batch.frame_ids[i])
             ts = float(batch.timestamp_s[i])
-
-            frame_type = _batch_frame_type(batch, i)
-            if frame_type == "stale":
-                logger.warning(
-                    "stale raw frame skipped cam_id=%d frame_id=%d abs_frame_id=%s",
-                    cam_id, frame_id,
-                    "" if batch.abs_frame_ids is None else int(batch.abs_frame_ids[i]),
-                )
-                continue
 
             pdc_val = _scalar_or_blank(batch.pdc, i)
             tcm_val = _scalar_or_blank(batch.tcm, i)
@@ -436,13 +429,21 @@ class CsvSink:
         row[-1] = entry.get("quality", "ok")
         self._write_corrected_row(row)
 
+    # Flush the corrected CSV every N rows rather than per row — a per-row
+    # flush costs a syscall at up to 40 Hz for the whole scan. on_complete
+    # flushes the tail, so at most the last N rows ride the OS buffer.
+    _CORRECTED_FLUSH_EVERY = 100
+
     def _write_corrected_row(self, row: list) -> None:
         w = self._get_or_open_corrected_writer()
         if w is None:
             return
         w.writerow(row)
-        if self._corrected_fh is not None:
+        self._corrected_rows_since_flush += 1
+        if (self._corrected_rows_since_flush >= self._CORRECTED_FLUSH_EVERY
+                and self._corrected_fh is not None):
             self._corrected_fh.flush()
+            self._corrected_rows_since_flush = 0
 
     def _get_or_open_corrected_writer(self):
         if self._corrected_csv is not None:
@@ -500,6 +501,71 @@ class CsvSink:
             return None
 
 
+def _is_integrity_event(event) -> bool:
+    """True for events that indicate a correction-integrity problem.
+
+    TriggerStateEvent is routine operational telemetry, and a
+    TerminalDarkResult with found=True is the expected happy path —
+    neither belongs in the integrity record.
+    """
+    from .batch import TerminalDarkResult, TriggerStateEvent
+    if isinstance(event, TriggerStateEvent):
+        return False
+    if isinstance(event, TerminalDarkResult) and event.found:
+        return False
+    return True
+
+
+def _event_frame(event):
+    """Best-effort frame/time locator for an event, for summaries."""
+    for attr in ("abs_frame_id", "first_timestamp_s"):
+        v = getattr(event, attr, None)
+        if v is not None:
+            return v
+    return None
+
+
+class DiagnosticsLogSink:
+    """Default consumer for the "diagnostics" channel.
+
+    Always injected by ScanWorkflow (independent of storage flags) so
+    integrity events — DarkIntegrityWarning (laser apparently on during a
+    dark frame), TerminalDarkResult(found=False) (terminal interval lost),
+    StencilFallback, PipelineError (batch dropped) — are logged at WARNING
+    instead of silently evaporating, with a per-type summary at scan end.
+
+    The durable counterpart lives in ScanDBSink, which also subscribes to
+    "diagnostics" and writes the same summary into the session's
+    session_meta so the DB record itself shows whether a scan had
+    integrity warnings.
+    """
+
+    channels = {"diagnostics"}
+
+    def __init__(self) -> None:
+        self._scan_id: str = ""
+        self._counts: dict[str, int] = {}
+
+    def on_scan_start(self, meta: ScanMetadata) -> None:
+        self._scan_id = meta.scan_id
+        self._counts = {}
+
+    def consume(self, channel: str, event: Any) -> None:
+        if not _is_integrity_event(event):
+            return
+        name = type(event).__name__
+        self._counts[name] = self._counts.get(name, 0) + 1
+        logger.warning("scan %s integrity event: %r", self._scan_id, event)
+
+    def on_complete(self) -> None:
+        if self._counts:
+            logger.warning(
+                "scan %s completed with integrity events: %s",
+                self._scan_id,
+                ", ".join(f"{k}×{v}" for k, v in sorted(self._counts.items())),
+            )
+
+
 class ScanDBSink:
     """Channel-based SQLite sink for the pipeline.
 
@@ -510,6 +576,10 @@ class ScanDBSink:
                   stencilled leading dark frame — a gapless 40 Hz record.
                   Reduced mode: only the side-average frames (cam_id=-1)
                   emitted by SideAverageStage are persisted.
+        "diagnostics" — integrity events are tallied and a per-type summary
+                  (count + first/last frame) is written into the session's
+                  session_meta at scan end, so the DB record itself shows
+                  whether the scan had correction-integrity warnings.
 
     The DB is the corrected (final-branch) record only. Realtime values
     reach the GUI via the "live" / "live_side" channels and are never
@@ -519,7 +589,7 @@ class ScanDBSink:
     (~15 s), and an unclean shutdown loses that tail.
     """
 
-    channels = {"final"}
+    channels = {"final", "diagnostics"}
 
     # If the scan database can't be opened, abort the scan rather than run
     # it with no durable record (see ScanRunner.CriticalSinkError).
@@ -533,7 +603,9 @@ class ScanDBSink:
         self._db = None
         self._session_id: Optional[int] = None
         self._meta: Optional[ScanMetadata] = None
+        self._session_meta: Optional[dict] = None
         self._buffer: list = []
+        self._diag: dict[str, dict] = {}
         self._closed = False
 
     def on_scan_start(self, meta: ScanMetadata) -> None:
@@ -541,33 +613,37 @@ class ScanDBSink:
         import time
         self._meta = meta
         self._closed = False
+        self._diag = {}
         label = f"{meta.scan_id}_{meta.subject_id}"
         self._db = ScanDatabase(db_path=self._db_path)
+        # data_semantics distinguishes final-branch sessions from legacy
+        # ones whose session_data held realtime (live-branch) values.
+        # Readers treat a missing key as legacy.
+        self._session_meta = {
+            "scan_id": meta.scan_id,
+            "subject_id": meta.subject_id,
+            "operator": meta.operator,
+            "started_at_iso": meta.started_at_iso,
+            "duration_sec": meta.duration_sec,
+            "data_semantics": "final",
+            "sdk_flags": {
+                "reduced_mode": meta.reduced_mode,
+                "left_camera_mask": meta.left_camera_mask,
+                "right_camera_mask": meta.right_camera_mask,
+            },
+        }
         self._session_id = self._db.create_session(
             session_label=label,
             session_start=time.time(),
             session_notes=None,
-            # data_semantics distinguishes final-branch sessions from legacy
-            # ones whose session_data held realtime (live-branch) values.
-            # Readers treat a missing key as legacy.
-            session_meta={
-                "scan_id": meta.scan_id,
-                "subject_id": meta.subject_id,
-                "operator": meta.operator,
-                "started_at_iso": meta.started_at_iso,
-                "duration_sec": meta.duration_sec,
-                "data_semantics": "final",
-                "sdk_flags": {
-                    "reduced_mode": meta.reduced_mode,
-                    "left_camera_mask": meta.left_camera_mask,
-                    "right_camera_mask": meta.right_camera_mask,
-                },
-            },
+            session_meta=self._session_meta,
         )
 
     def consume(self, channel: str, payload: Any) -> None:
         if channel == "final":
             self._consume_final(payload)
+        elif channel == "diagnostics":
+            self._consume_diagnostic(payload)
 
     def on_complete(self) -> None:
         if self._closed:
@@ -577,6 +653,17 @@ class ScanDBSink:
         try:
             self._flush()
             if self._db is not None and self._session_id is not None:
+                if self._diag and self._session_meta is not None:
+                    try:
+                        self._db.update_session(
+                            self._session_id,
+                            session_meta={**self._session_meta,
+                                          "diagnostics": self._diag},
+                        )
+                    except Exception:
+                        logger.exception(
+                            "ScanDBSink: failed to write diagnostics summary"
+                        )
                 self._db.close_session(self._session_id, time.time())
         except Exception:
             logger.exception("ScanDBSink.on_complete: failed to finalise session")
@@ -587,6 +674,22 @@ class ScanDBSink:
                 except Exception:
                     logger.exception("ScanDBSink: error closing ScanDatabase")
                 self._db = None
+
+    def _consume_diagnostic(self, event) -> None:
+        """Tally integrity events for the session_meta summary."""
+        if not _is_integrity_event(event):
+            return
+        name = type(event).__name__
+        rec = self._diag.get(name)
+        loc = _event_frame(event)
+        if rec is None:
+            self._diag[name] = {"count": 1, "first": loc, "last": loc}
+        else:
+            rec["count"] += 1
+            if loc is not None:
+                rec["last"] = loc
+                if rec["first"] is None:
+                    rec["first"] = loc
 
     # ------------------------------------------------------------------
     # Internal

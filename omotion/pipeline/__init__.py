@@ -27,24 +27,26 @@ from .batch import (
     DarkIntegrityWarning,
     StencilFallback,
     TerminalDarkResult,
+    PipelineError,
 )
 from .pipeline import Pipeline, Stage
 from .tee import Tee
 from .runner import ScanRunner, CriticalSinkError
 from .factory import default_pipeline
 from .pedestal import SensorPedestals
-from .sinks import Sink, ScanMetadata, CsvSink, ScanDBSink
+from .sinks import Sink, ScanMetadata, CsvSink, ScanDBSink, DiagnosticsLogSink
 from .sources import Source, LiveUsbSource, CsvReplaySource
 
 
 __all__ = [
     "FrameBatch", "BatchEvent", "IntervalClosed", "LiveEmit",
     "DarkIntegrityWarning", "StencilFallback", "TerminalDarkResult",
+    "PipelineError",
     "Pipeline", "Stage", "Tee",
     "ScanRunner", "CriticalSinkError",
     "default_pipeline",
     "SensorPedestals",
     "Sink", "ScanMetadata",
-    "CsvSink", "ScanDBSink",
+    "CsvSink", "ScanDBSink", "DiagnosticsLogSink",
     "Source", "LiveUsbSource", "CsvReplaySource",
 ]

@@ -84,6 +84,21 @@ class TerminalDarkResult(BatchEvent):
 
 
 @dataclass
+class PipelineError(BatchEvent):
+    """A stage raised during pipeline.process(); the batch was dropped.
+
+    Stage state is deliberately preserved (no reset): frame-id alignment and
+    dark history survive, and the gap left by the dropped batch is equivalent
+    to USB packet loss for those frames. Resetting instead would re-trip the
+    stale-first guard and permanently misalign the positional dark schedule.
+    Routed to the "diagnostics" channel.
+    """
+    error:             str              # repr of the exception
+    n_frames:          int              # rows in the dropped batch
+    first_timestamp_s: Optional[float]  # batch's first timestamp, if any
+
+
+@dataclass
 class TriggerStateEvent(BatchEvent):
     """Emitted whenever the laser trigger transitions ON or OFF.
 
@@ -301,3 +316,26 @@ class FrameBatch:
             value = getattr(self, f.name)
             kwargs[f.name] = value.copy() if isinstance(value, np.ndarray) else value
         return FrameBatch(**kwargs)
+
+    def iter_rows(self, *, exclude: "set[str] | frozenset[str]" = frozenset()):
+        """Yield ``(i, side_idx, cam_id, frame_type)`` per row, skipping rows
+        whose ``frame_type`` is in ``exclude``.
+
+        The canonical per-row filter for sinks. Tee gates are BATCH-level —
+        a batch is emitted if any row passes, so stale/warmup rows still
+        reach every subscribed sink and must be skipped per row. Use this
+        instead of hand-rolling the loop so the skip policy can't drift
+        between sinks.
+
+        ``side_idx`` is -1 when the batch carries no ``side_ids`` (legacy
+        replay batches); ``frame_type`` is "" before classification.
+        """
+        ft = self.frame_type
+        side_ids = self.side_ids
+        n = self.cam_ids.shape[0]
+        for i in range(n):
+            ftype = str(ft[i]) if ft is not None else ""
+            if ftype in exclude:
+                continue
+            side_idx = int(side_ids[i]) if side_ids is not None else -1
+            yield i, side_idx, int(self.cam_ids[i]), ftype

@@ -63,9 +63,10 @@ DEGRADED_SCANS = [
     {
         # Recorded with the stimulator at 300 ms cadence (was mislabeled as a
         # clean scan). Mild signature: one packet per ~12 frames on the right
-        # module stamped ~10 ms early (per-camera dt pattern 25,…,15,35,…,25);
-        # the left side also has one real anomaly — a 151 ms gap (~t=147 s
-        # normalized) where the frame counter advanced only 1 on all 4 cams.
+        # module stamped ~10 ms early (per-camera dt pattern 25,…,15,35,…,25).
+        # The left side's single 151 ms step at the end of the data is the
+        # ordinary terminal stop frame (firmware laser-off frame fires
+        # ~150 ms off-grid on every scan), not an anomaly.
         "name": "owYWB8TN_stim300ms",
         "left_raw": SCANS_DIR / "20260602_135759_owYWB8TN_left_mask66_raw.csv",
         "right_raw": SCANS_DIR / "20260602_135759_owYWB8TN_right_mask66_raw.csv",

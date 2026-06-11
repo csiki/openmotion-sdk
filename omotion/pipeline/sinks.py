@@ -518,7 +518,7 @@ def _is_integrity_event(event) -> bool:
 
 def _event_frame(event):
     """Best-effort frame/time locator for an event, for summaries."""
-    for attr in ("abs_frame_id", "first_timestamp_s"):
+    for attr in ("abs_frame_id", "onset_fid", "first_timestamp_s"):
         v = getattr(event, attr, None)
         if v is not None:
             return v
@@ -553,9 +553,13 @@ class DiagnosticsLogSink:
     def consume(self, channel: str, event: Any) -> None:
         if not _is_integrity_event(event):
             return
+        from .batch import TimestampMisalignmentWindow
         name = type(event).__name__
         self._counts[name] = self._counts.get(name, 0) + 1
-        logger.warning("scan %s integrity event: %r", self._scan_id, event)
+        # TimestampRepairStage already logs each window with full context
+        # under its own logger — count it for the summary, don't double-log.
+        if not isinstance(event, TimestampMisalignmentWindow):
+            logger.warning("scan %s integrity event: %r", self._scan_id, event)
 
     def on_complete(self) -> None:
         if self._counts:

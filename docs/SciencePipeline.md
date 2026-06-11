@@ -94,6 +94,7 @@ Stages produce events when something doesn't fit cleanly into per-frame arrays. 
 | `DarkIntegrityWarning(...)` | `DarkIntegrityGuard` (inside DarkCorrectionStage) | `"diagnostics"` |
 | `StencilFallback(...)` | `DarkFrameQuadraticStencil` (inside DarkFrameHoldStage) | `"diagnostics"` |
 | `PipelineError(...)` | `ScanRunner` (a stage raised; the batch was dropped, state preserved) | `"diagnostics"` |
+| `TimestampMisalignmentWindow(...)` | `TimestampRepairStage` (per-side coalesced window; the terminal stop-frame artifact — the firmware's laser-off frame fires ~150 ms off-grid at every scan stop — is reclassified at INFO and NOT reported) | `"diagnostics"` |
 | `TerminalDarkResult(...)` | `DarkCorrectionStage.on_scan_stop` | `"diagnostics"` |
 | `TriggerStateEvent(...)` | `ScanWorkflow` (out of band, via `ScanRunner.dispatch_event`) | `"diagnostics"` |
 

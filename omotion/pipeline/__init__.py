@@ -28,6 +28,7 @@ from .batch import (
     StencilFallback,
     TerminalDarkResult,
     PipelineError,
+    TimestampMisalignmentWindow,
 )
 from .pipeline import Pipeline, Stage
 from .tee import Tee
@@ -41,7 +42,7 @@ from .sources import Source, LiveUsbSource, CsvReplaySource
 __all__ = [
     "FrameBatch", "BatchEvent", "IntervalClosed", "LiveEmit",
     "DarkIntegrityWarning", "StencilFallback", "TerminalDarkResult",
-    "PipelineError",
+    "PipelineError", "TimestampMisalignmentWindow",
     "Pipeline", "Stage", "Tee",
     "ScanRunner", "CriticalSinkError",
     "default_pipeline",

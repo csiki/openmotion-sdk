@@ -9,7 +9,7 @@ def test_public_api_symbols_importable() -> None:
         Pipeline, Stage,
         FrameBatch, BatchEvent, IntervalClosed, LiveEmit,
         DarkIntegrityWarning, StencilFallback, TerminalDarkResult,
-        PipelineError,
+        PipelineError, TimestampMisalignmentWindow,
         ScanRunner, CriticalSinkError,
         Source, LiveUsbSource, CsvReplaySource,
         Sink, ScanMetadata,
@@ -20,7 +20,8 @@ def test_public_api_symbols_importable() -> None:
     for sym in (
         Pipeline, Stage, FrameBatch, BatchEvent, IntervalClosed, LiveEmit,
         DarkIntegrityWarning, StencilFallback, TerminalDarkResult,
-        PipelineError, ScanRunner, CriticalSinkError,
+        PipelineError, TimestampMisalignmentWindow,
+        ScanRunner, CriticalSinkError,
         Source, LiveUsbSource, CsvReplaySource,
         Sink, ScanMetadata, CsvSink, ScanDBSink, DiagnosticsLogSink,
         Tee, default_pipeline, SensorPedestals,
@@ -35,7 +36,7 @@ def test_public_api_all_list_complete() -> None:
     expected = {
         "FrameBatch", "BatchEvent", "IntervalClosed", "LiveEmit",
         "DarkIntegrityWarning", "StencilFallback", "TerminalDarkResult",
-        "PipelineError",
+        "PipelineError", "TimestampMisalignmentWindow",
         "Pipeline", "Stage", "Tee",
         "ScanRunner", "CriticalSinkError",
         "default_pipeline",

@@ -84,6 +84,26 @@ class TerminalDarkResult(BatchEvent):
 
 
 @dataclass
+class TimestampMisalignmentWindow(BatchEvent):
+    """A contiguous run of frames on one side whose timestamps deviated from
+    the frame-id cadence and were re-timestamped / NaN-filled by
+    TimestampRepairStage. Routed to "diagnostics" so the scan DB's
+    session_meta summary records it.
+
+    The expected terminal stop-frame artifact — the firmware's laser-off
+    frame fires ~150 ms off the 25 ms grid at scan stop, on every scan —
+    is deliberately NOT reported as one of these.
+    """
+    side:        int
+    onset_fid:   int
+    end_fid:     int
+    onset_t:     float
+    end_t:       float
+    n_corrected: int
+    n_nan:       int
+
+
+@dataclass
 class PipelineError(BatchEvent):
     """A stage raised during pipeline.process(); the batch was dropped.
 

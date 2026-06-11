@@ -746,11 +746,13 @@ is intentionally **excluded** from this backlog — see §6.)
   no-stim baseline on hardware).
   - **(a) Clean baseline — no alerts for no reason.** Stimulator OFF, run a
     ≥5-minute scan with the scan DB enabled. Assert: zero `"ts_corrected"` /
-    `"nan_filled"` rows in `session_data`, no "Misalignment window" WARNINGs,
-    and `session_meta` has **no** `"diagnostics"` key (the ScanDBSink summary
-    only appears when integrity events occurred). Repeat across both sensor
-    modules and with IMU streaming on/off, since periodic firmware tasks are
-    the suspected jitter source if this ever trips.
+    `"nan_filled"` rows in `session_data`, **zero WARNINGs** from
+    `timestamp_repair` (the terminal stop frame — the firmware's laser-off
+    frame fires ~151 ms off-grid at every scan stop — is reclassified at
+    INFO and must not warn), and `session_meta` has **no** `"diagnostics"`
+    key. Repeat across both sensor modules and with IMU streaming on/off,
+    since periodic firmware tasks are the suspected jitter source if this
+    ever trips.
   - **(b) Stim — detector and corrector behave.** Stimulator ON at 300 ms,
     same scan. Assert: misalignment windows are detected at the stim cadence
     (~3.3 Hz), `session_meta["diagnostics"]` records them, and the corrected

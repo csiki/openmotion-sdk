@@ -2,6 +2,7 @@ import logging
 import struct
 import json
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -86,6 +87,14 @@ from omotion.Calibration import (
 from omotion.CommandError import CommandError
 
 logger = logging.getLogger(f"{_log_root}.Console" if _log_root else "Console")
+
+_SERIAL_RE = re.compile(r"^[A-Z0-9]{1,24}$")
+
+
+def is_valid_console_serial(serial: str) -> bool:
+    """True if serial is 1-24 uppercase-alphanumeric characters."""
+    return isinstance(serial, str) and bool(_SERIAL_RE.match(serial))
+
 
 # --------------------------------------------------------------------------- #
 # Dataclasses

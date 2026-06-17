@@ -1619,9 +1619,10 @@ class MotionSensor(SignalWrapper):
                 )
             else:
                 uid_summary = "none cached"
+            serial = self.read_serial_number() or "unprogrammed"
             logger.info(
-                "Sensor: firmware=%s  hw_id=%s  camera_uids=[%s]",
-                fw_version, hw_id, uid_summary,
+                "Sensor: firmware=%s  hw_id=%s  serial=%s  camera_uids=[%s]",
+                fw_version, hw_id, serial, uid_summary,
             )
         except Exception as e:
             logger.warning("Sensor: failed to read device info: %s", e)

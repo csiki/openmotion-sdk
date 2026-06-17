@@ -3094,7 +3094,8 @@ class MotionConsole(SignalWrapper):
         try:
             fw_version = self.get_version()
             hw_id      = self.get_hardware_id()
-            logger.info("Console: firmware=%s  hw_id=%s", fw_version, hw_id)
+            serial = self.read_serial_number() or "unprogrammed"
+            logger.info("Console: firmware=%s  hw_id=%s  serial=%s", fw_version, hw_id, serial)
         except Exception as e:
             logger.warning("Console: failed to read device info: %s", e)
             return

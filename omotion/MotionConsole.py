@@ -31,7 +31,9 @@ from omotion.config import (
     FPGA_PROG_UFM_WRITE_PAGE,
     FPGA_PROG_UFM_WRITE_PAGES,
     OW_CMD,
+    OW_CMD_SERIAL,
     OW_CMD_DFU,
+    is_valid_serial,
     OW_FPGA_PROG,
     OW_CMD_ECHO,
     OW_CMD_HWID,
@@ -56,6 +58,7 @@ from omotion.config import (
     OW_CTRL_GET_TRIG,
     OW_CTRL_I2C_RD,
     OW_CTRL_I2C_SCAN,
+    OW_CTRL_I2C_STATUS,
     OW_CTRL_I2C_WR,
     OW_CTRL_PDUMON,
     OW_CTRL_READ_ADC,
@@ -75,6 +78,7 @@ from omotion.config import (
 
 from omotion.GitHubReleases import GitHubReleases
 from omotion.MotionConfig import MotionConfig, MotionConfigHeader
+from omotion.utils import log_i2c_health
 from omotion.Calibration import (
     Calibration,
     parse_calibration,
@@ -84,6 +88,11 @@ from omotion.Calibration import (
 from omotion.CommandError import CommandError
 
 logger = logging.getLogger(f"{_log_root}.Console" if _log_root else "Console")
+
+# Backwards-compatible alias; the canonical validator now lives in
+# omotion.config.is_valid_serial (shared by console + sensor).
+is_valid_console_serial = is_valid_serial
+
 
 # --------------------------------------------------------------------------- #
 # Dataclasses
@@ -168,6 +177,10 @@ class MotionConsole(SignalWrapper):
         self._state_cv = threading.Condition()
         self._monitor = None  # set by MotionInterface.start()
         self._version = "v0.0.0"
+
+        # Boot-time I2C health snapshot, populated at connection (None until
+        # then, or if the device firmware predates the I2C-status command).
+        self._i2c_health: Optional[dict] = None
 
     # ──────────────────────────────────────────────────────────────────
     # State (read-only from outside)
@@ -279,6 +292,7 @@ class MotionConsole(SignalWrapper):
     def _drive_connecting(self, reason: str) -> None:
         if self.uart.demo_mode:
             self._set_state(ConnectionState.CONNECTING, reason=reason)
+            self._check_i2c_health()
             self._set_state(ConnectionState.CONNECTED, reason="demo_mode")
             try:
                 self.telemetry.start()
@@ -314,6 +328,11 @@ class MotionConsole(SignalWrapper):
                 # version invoke `get_version()` from their own
                 # CONNECTED handler (e.g. `log_console_info`), which
                 # works correctly post-transition.
+                # Assess device health from the firmware's boot-time I2C scan.
+                # Best-effort: never blocks or fails the connection. Done
+                # before the CONNECTED transition so handle.i2c_health is
+                # ready the instant a waiter observes is_connected().
+                self._check_i2c_health()
                 self._set_state(ConnectionState.CONNECTED, reason="ping_ok")
                 try:
                     self.telemetry.start()
@@ -370,6 +389,7 @@ class MotionConsole(SignalWrapper):
             self.uart.close()
         except Exception:
             logger.exception("uart close failed")
+        self._i2c_health = None
         self._set_state(ConnectionState.DISCONNECTED, reason=reason)
 
     # ──────────────────────────────────────────────────────────────────
@@ -574,6 +594,93 @@ class MotionConsole(SignalWrapper):
             self._log_command_error("get_hardware_id", e)
             raise  # Re-raise the exception for the caller to handle
 
+    def read_serial_number(self) -> str | None:
+        """
+        Read the console hardware serial number from the external EEPROM.
+
+        Returns:
+            str: the serial (uppercase alphanumeric) if programmed,
+            None if unprogrammed or on error.
+        """
+        try:
+            if self.uart.demo_mode:
+                return "QWW04Q10003"
+
+            if not self.is_connected():
+                logger.error("Console Module not connected")
+                return None
+
+            r = self.uart.send_packet(
+                id=None, packetType=OW_CMD, command=OW_CMD_SERIAL, reserved=0
+            )
+            self.uart.clear_buffer()
+
+            if r is None or r.packetType == OW_ERROR:
+                logger.error("Error reading console serial number")
+                return None
+            if r.data_len == 0:
+                return None  # unprogrammed
+            return bytes(r.data[: r.data_len]).decode("ascii", errors="replace")
+        except ValueError as v:
+            logger.error("ValueError: %s", v)
+            raise
+        except Exception as e:
+            self._log_command_error("read_serial_number", e)
+            raise
+
+    def write_serial_number(self, serial: str, force: bool = False) -> bool:
+        """
+        Write the console hardware serial number to the external EEPROM.
+
+        Args:
+            serial: 1-24 uppercase-alphanumeric characters.
+            force: if False, the console refuses to overwrite an already-programmed
+                   serial (returns False). If True, it overwrites.
+
+        Returns:
+            bool: True on ACK, False on NAK/error/invalid input.
+        """
+        if not is_valid_console_serial(serial):
+            logger.error("Invalid console serial %r (need 1-24 of [A-Z0-9])", serial)
+            return False
+        try:
+            if self.uart.demo_mode:
+                return True
+
+            if not self.is_connected():
+                logger.error("Console Module not connected")
+                return False
+
+            r = self.uart.send_packet(
+                id=None,
+                packetType=OW_CMD,
+                command=OW_CMD_SERIAL,
+                reserved=(2 if force else 1),
+                data=serial.encode("ascii"),
+            )
+            self.uart.clear_buffer()
+
+            if r is None or r.packetType == OW_ERROR:
+                logger.error("Console rejected serial write (already programmed? use force)")
+                return False
+
+            # Read-back verify. Guards against firmware that ACKs the command but
+            # doesn't persist it — e.g. older builds without OW_CMD_SERIAL, which
+            # reply with a generic (non-error) packet. Without this check the write
+            # would look successful while nothing was stored.
+            readback = self.read_serial_number()
+            if readback != serial:
+                logger.error(
+                    "Console serial write not persisted (read back %r, expected %r); "
+                    "firmware may not support OW_CMD_SERIAL",
+                    readback, serial,
+                )
+                return False
+            return True
+        except Exception as e:
+            self._log_command_error("write_serial_number", e)
+            return False
+
     def enter_dfu(self) -> bool:
         """
         Perform a soft reset to enter DFU mode on Console device.
@@ -742,6 +849,106 @@ class MotionConsole(SignalWrapper):
                 e,
             )
             raise
+
+    def get_i2c_health(self, rescan: bool = False) -> dict | None:
+        """Return the boot-time I2C health snapshot, or None on error.
+
+        At startup the console firmware passively pings every expected I2C
+        device across its two TCA9548 muxes and the fan bus, and caches the
+        result. This reads that snapshot.
+
+        Args:
+            rescan: if True, ask the firmware to re-run the (passive) scan live
+                before returning; if False, returns the cached boot snapshot.
+
+        Returns a dict::
+
+            {
+                "version": int,
+                "mux0": bool,          # TCA9548 #0 @0x70 on I2C1
+                "mux1": bool,          # TCA9548 #1 @0x70 on I2C2
+                "seed_cfg_fpga": bool, # XO2 config @0x40, mux0 ch0
+                "gpio_exp": bool,      # PCA9535 @0x20, mux1 ch0
+                "pdu_adc0": bool,      # ADS7828 @0x48, mux1 ch0
+                "pdu_adc1": bool,      # ADS7828 @0x4B, mux1 ch0
+                "tec_adc": bool,       # ADS7924 @0x49, mux1 ch3
+                "fan": bool,           # MAX6663 @0x2C, I2C4
+                "temps": [bool, bool, bool],  # MAX31875 0x49/0x4A/0x4B, mux1 ch1
+                "fpgas": {"ta": bool, "seed": bool, "ee": bool, "opt": bool},  # 0x41, mux1 ch4-7
+                "all_present": bool,
+            }
+        """
+        if self.uart.demo_mode:
+            return {
+                "version": 1,
+                "mux0": True, "mux1": True, "seed_cfg_fpga": True,
+                "gpio_exp": True, "pdu_adc0": True, "pdu_adc1": True,
+                "tec_adc": True, "fan": True,
+                "temps": [True, True, True],
+                "fpgas": {"ta": True, "seed": True, "ee": True, "opt": True},
+                "all_present": True,
+            }
+        try:
+            r = self.uart.send_packet(
+                id=None,
+                packetType=OW_CONTROLLER,
+                command=OW_CTRL_I2C_STATUS,
+                reserved=(1 if rescan else 0),
+            )
+            self.uart.clear_buffer()
+            if r is None or r.packetType == OW_ERROR or not r.data or r.data_len < 12:
+                return None
+            d = r.data
+            temp_mask = d[9]
+            fpga_mask = d[10]
+            return {
+                "version": d[0],
+                "mux0": bool(d[1]),
+                "mux1": bool(d[2]),
+                "seed_cfg_fpga": bool(d[3]),
+                "gpio_exp": bool(d[4]),
+                "pdu_adc0": bool(d[5]),
+                "pdu_adc1": bool(d[6]),
+                "tec_adc": bool(d[7]),
+                "fan": bool(d[8]),
+                "temps": [bool(temp_mask & (1 << i)) for i in range(3)],
+                "fpgas": {
+                    "ta": bool(fpga_mask & (1 << 4)),
+                    "seed": bool(fpga_mask & (1 << 5)),
+                    "ee": bool(fpga_mask & (1 << 6)),
+                    "opt": bool(fpga_mask & (1 << 7)),
+                },
+                "all_present": bool(d[11]),
+            }
+        except Exception as e:
+            self._log_command_error("get_i2c_health", e)
+            return None
+
+    def _check_i2c_health(self) -> None:
+        """Read and cache the boot-time I2C health snapshot (connection step).
+
+        Best-effort: reads the cached firmware snapshot (no disruptive rescan),
+        never raises, and never affects the connection result. Stores the
+        snapshot on the handle and logs the outcome.
+        """
+        try:
+            self._i2c_health = self.get_i2c_health()
+        except Exception as e:
+            logger.debug("%s: I2C health check failed: %s", self.name, e)
+            self._i2c_health = None
+        log_i2c_health(self.name, self._i2c_health, logger)
+
+    @property
+    def i2c_health(self) -> Optional[dict]:
+        """Cached boot-time I2C health snapshot, or None if unavailable.
+
+        Populated at connection. See :meth:`get_i2c_health` for the shape.
+        """
+        return self._i2c_health
+
+    def is_i2c_healthy(self) -> bool:
+        """True iff a health snapshot is present and every expected device responded."""
+        return bool(self._i2c_health and self._i2c_health.get("all_present"))
 
     def read_i2c_packet(
         self,
@@ -2900,7 +3107,8 @@ class MotionConsole(SignalWrapper):
         try:
             fw_version = self.get_version()
             hw_id      = self.get_hardware_id()
-            logger.info("Console: firmware=%s  hw_id=%s", fw_version, hw_id)
+            serial = self.read_serial_number() or "unprogrammed"
+            logger.info("Console: firmware=%s  hw_id=%s  serial=%s", fw_version, hw_id, serial)
         except Exception as e:
             logger.warning("Console: failed to read device info: %s", e)
             return

@@ -22,6 +22,8 @@ from omotion.config import (
     OW_CMD,
     OW_CMD_ECHO,
     OW_CMD_HWID,
+    OW_CMD_I2C_REG_READ,
+    OW_CMD_I2C_STATUS,
     OW_CMD_PING,
     OW_CMD_RESET,
     OW_CMD_TOGGLE_LED,
@@ -67,11 +69,13 @@ from omotion.config import (
     OW_CAMERA_POWER_STATUS,
     OW_CAMERA_READ_SECURITY_UID,
     OW_CMD_DFU,
+    OW_CMD_SERIAL,
+    is_valid_serial,
 )
 from omotion.i2c_packet import I2C_Packet
 from omotion.GitHubReleases import GitHubReleases
 from omotion.MotionProcessing import bytes_to_integers
-from omotion.utils import calculate_file_crc
+from omotion.utils import calculate_file_crc, log_i2c_health
 from omotion import _log_root
 
 logger = logging.getLogger(f"{_log_root}.Sensor" if _log_root else "Sensor")
@@ -145,6 +149,10 @@ class MotionSensor(SignalWrapper):
         self._cached_hwid: Optional[str] = None
         self.hardware_id: Optional[str] = None  # alias kept on the handle for clarity
         self._version: str = "v0.0.0"
+
+        # Boot-time I2C health snapshot, populated at connection (None until
+        # then, or if the device firmware predates the I2C-status command).
+        self._i2c_health: Optional[dict] = None
 
         # State machine
         self._state = ConnectionState.DISCONNECTED
@@ -316,6 +324,11 @@ class MotionSensor(SignalWrapper):
                 except Exception as e:
                     logger.debug("get_version during connect failed: %s", e)
 
+                # Assess device health from the firmware's boot-time I2C scan.
+                # Best-effort: never blocks or fails the connection. Done
+                # before the CONNECTED transition so handle.i2c_health is
+                # ready the instant a waiter observes is_connected().
+                self._check_i2c_health()
                 self._set_state(ConnectionState.CONNECTED, reason="ping_ok")
                 return
             except Exception as e:
@@ -334,6 +347,7 @@ class MotionSensor(SignalWrapper):
                 self._cached_camera_uids = None
                 self._cached_hwid = None
                 self.hardware_id = None
+                self._i2c_health = None
                 time.sleep(delay)
 
         self._set_state(
@@ -352,6 +366,7 @@ class MotionSensor(SignalWrapper):
         self._cached_camera_uids = None
         self._cached_hwid = None
         self.hardware_id = None
+        self._i2c_health = None
         self._set_state(ConnectionState.DISCONNECTED, reason=reason)
 
     # ------------------------------------------------------------------
@@ -405,6 +420,69 @@ class MotionSensor(SignalWrapper):
             return ver_str or "v0.0.0"
         return "v0.0.0"
 
+    def read_serial_number(self) -> str | None:
+        """Read the sensor module hardware serial number (None if unprogrammed/error)."""
+        try:
+            if self.demo_mode:
+                return "QWW04Q10003"
+            if not self.is_connected():
+                logger.error("Sensor Module not connected")
+                return None
+            r = self._send(packetType=OW_CMD, command=OW_CMD_SERIAL, reserved=0)
+            if r is None or r.packetType in _ERROR_TYPES:
+                logger.error("Error reading sensor serial number")
+                return None
+            if r.data_len == 0:
+                return None  # unprogrammed
+            return bytes(r.data[: r.data_len]).decode("ascii", errors="replace")
+        except Exception as e:
+            logger.error("read_serial_number failed: %s", e)
+            return None
+
+    def write_serial_number(self, serial: str, force: bool = False) -> bool:
+        """Write the sensor module hardware serial number.
+
+        Args:
+            serial: 1-24 uppercase-alphanumeric characters.
+            force: if False, refuses to overwrite an already-programmed serial.
+        Returns:
+            bool: True on ACK, False on NAK/error/invalid input.
+        """
+        if not is_valid_serial(serial):
+            logger.error("Invalid sensor serial %r (need 1-24 of [A-Z0-9])", serial)
+            return False
+        try:
+            if self.demo_mode:
+                return True
+            if not self.is_connected():
+                logger.error("Sensor Module not connected")
+                return False
+            r = self._send(
+                packetType=OW_CMD,
+                command=OW_CMD_SERIAL,
+                reserved=(2 if force else 1),
+                data=serial.encode("ascii"),
+            )
+            if r is None or r.packetType in _ERROR_TYPES:
+                logger.error("Sensor rejected serial write (already programmed? use force)")
+                return False
+
+            # Read-back verify. Guards against firmware that ACKs the command but
+            # doesn't persist it, so a write only reports success once the value
+            # is actually readable back.
+            readback = self.read_serial_number()
+            if readback != serial:
+                logger.error(
+                    "Sensor serial write not persisted (read back %r, expected %r); "
+                    "firmware may not support OW_CMD_SERIAL",
+                    readback, serial,
+                )
+                return False
+            return True
+        except Exception as e:
+            logger.error("write_serial_number failed: %s", e)
+            return False
+
     def echo(self, echo_data=None) -> tuple[bytes, int]:
         """Send echo_data and return (echoed_bytes, length), or (None, None)."""
         if self.demo_mode:
@@ -442,6 +520,91 @@ class MotionSensor(SignalWrapper):
             return bytes.fromhex("deadbeefcafebabe1122334455667788")
         r = self._send(packetType=OW_CMD, command=OW_CMD_HWID)
         return r.data.hex() if r.data_len == 16 else None
+
+    # ------------------------------------------------------------------
+    # I2C health
+    # ------------------------------------------------------------------
+
+    def get_i2c_health(self, rescan: bool = False) -> dict | None:
+        """Return the boot-time I2C health snapshot, or None on error.
+
+        The firmware verifies, at startup, that every expected I2C device is
+        present: the TCA9548A mux, the ICM-20948 IMU, and all 8 cameras
+        (OV2312) + 8 FPGAs (CrossLink) behind the mux. The USB PHY is not on
+        I2C (ULPI) and is excluded.
+
+        Args:
+            rescan: if True, ask the firmware to re-run the scan live (powers
+                each camera one at a time, ~2 s) before returning. If False,
+                returns the cached boot snapshot immediately.
+
+        Returns a dict::
+
+            {
+                "version": int,
+                "mux": bool,             # TCA9548A 0x70
+                "imu": bool,             # ICM-20948 0x68
+                "cameras": [bool] * 8,   # OV2312 0x36 per mux channel
+                "fpgas":   [bool] * 8,   # CrossLink 0x40 per mux channel
+                "cameras_expected": int, # bitmask, 0xFF = all 8
+                "all_present": bool,
+            }
+        """
+        if self.demo_mode:
+            return {
+                "version": 1,
+                "mux": True,
+                "imu": True,
+                "cameras": [True] * 8,
+                "fpgas": [True] * 8,
+                "cameras_expected": 0xFF,
+                "all_present": True,
+            }
+        r = self._send(
+            packetType=OW_CMD,
+            command=OW_CMD_I2C_STATUS,
+            reserved=(1 if rescan else 0),
+        )
+        if r is None or r.packetType in _ERROR_TYPES or r.data_len < 8:
+            return None
+        d = r.data
+        cam_mask = d[3]
+        fpga_mask = d[4]
+        return {
+            "version": d[0],
+            "mux": bool(d[1]),
+            "imu": bool(d[2]),
+            "cameras": [bool(cam_mask & (1 << i)) for i in range(8)],
+            "fpgas": [bool(fpga_mask & (1 << i)) for i in range(8)],
+            "cameras_expected": d[5],
+            "all_present": bool(d[6]),
+        }
+
+    def _check_i2c_health(self) -> None:
+        """Read and cache the boot-time I2C health snapshot (connection step).
+
+        Best-effort: reads the cached firmware snapshot (no disruptive rescan),
+        never raises, and never affects the connection result. Stores the
+        snapshot on the handle and logs the outcome.
+        """
+        try:
+            self._i2c_health = self.get_i2c_health()
+        except Exception as e:
+            logger.debug("%s: I2C health check failed: %s", self.name, e)
+            self._i2c_health = None
+        log_i2c_health(self.name, self._i2c_health, logger)
+
+    @property
+    def i2c_health(self) -> Optional[dict]:
+        """Cached boot-time I2C health snapshot, or None if unavailable.
+
+        Populated at connection. See :meth:`get_i2c_health` for the shape.
+        """
+        return self._i2c_health
+
+    def is_i2c_healthy(self) -> bool:
+        """True iff a health snapshot is present and every expected device responded."""
+        return bool(self._i2c_health and self._i2c_health.get("all_present"))
 
     # ------------------------------------------------------------------
     # Fan control
@@ -609,6 +772,66 @@ class MotionSensor(SignalWrapper):
         result = bytes(r.data[:r.data_len]) if r.data and r.data_len else b""
         logger.debug("LP i2c_write_read: addr=0x%02X wrote=%d read=%d data=%s",
                      dev_addr, write_len, len(result),
+                     [f"0x{b:02X}" for b in result])
+        return result
+
+    def i2c_read_register(self, dev_addr: int, reg_addr: int, read_len: int = 1,
+                          reg_addr_size: int = 1,
+                          mux_channel: Optional[int] = None) -> bytes:
+        """Read register bytes from an arbitrary I2C device on the sensor bus.
+
+        Payload (7 bytes, big-endian):
+            [dev_addr, reg_addr_size, mux_channel,
+             reg_addr_hi, reg_addr_lo, read_len_hi, read_len_lo]
+        where ``mux_channel == 0xFF`` means "do not touch the TCA9548A mux".
+
+        Args:
+            dev_addr: 7-bit I2C device address (0x00-0x7F).
+            reg_addr: Register / memory address to read from.
+            read_len: Number of bytes to read (1-256).
+            reg_addr_size: Register address width in bytes: 1 (8-bit) or 2 (16-bit).
+            mux_channel: TCA9548A (0x70) channel 0-7 to select before reading,
+                or None to read a device directly on the bus.
+
+        Returns:
+            Bytes read from the device, or False on an error response.
+
+        Raises:
+            ValueError: On out-of-range arguments.
+            OWNotConnectedError, OWCommunicationError, OWDeviceError.
+        """
+        if not (0x00 <= dev_addr <= 0x7F):
+            raise ValueError(f"dev_addr must be 0x00-0x7F, got {dev_addr:#04x}")
+        if reg_addr_size not in (1, 2):
+            raise ValueError(f"reg_addr_size must be 1 or 2, got {reg_addr_size}")
+        max_reg = 0xFF if reg_addr_size == 1 else 0xFFFF
+        if not (0 <= reg_addr <= max_reg):
+            raise ValueError(
+                f"reg_addr 0x{reg_addr:X} does not fit in "
+                f"{reg_addr_size * 8}-bit address")
+        if not (1 <= read_len <= 256):
+            raise ValueError(f"read_len must be 1-256, got {read_len}")
+        if mux_channel is not None and not (0 <= mux_channel <= 7):
+            raise ValueError(f"mux_channel must be 0-7 or None, got {mux_channel}")
+
+        mux_byte = 0xFF if mux_channel is None else mux_channel
+        payload = bytearray([
+            dev_addr      & 0xFF,
+            reg_addr_size & 0xFF,
+            mux_byte      & 0xFF,
+            (reg_addr >> 8) & 0xFF,
+            reg_addr        & 0xFF,
+            (read_len >> 8) & 0xFF,
+            read_len        & 0xFF,
+        ])
+
+        r = self._send(packetType=OW_CMD, command=OW_CMD_I2C_REG_READ, data=payload)
+        if r.packetType in _ERROR_TYPES:
+            return False
+
+        result = bytes(r.data[:r.data_len]) if r.data and r.data_len else b""
+        logger.debug("i2c_read_register: addr=0x%02X reg=0x%X size=%d len=%d data=%s",
+                     dev_addr, reg_addr, reg_addr_size, len(result),
                      [f"0x{b:02X}" for b in result])
         return result
 
@@ -1458,23 +1681,39 @@ class MotionSensor(SignalWrapper):
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def log_device_info(self) -> None:
-        """Log sensor firmware version, hardware ID, and cached camera UIDs to the SDK logger."""
+    def log_device_info(self, label: str | None = None) -> None:
+        """Log a ``====``-guarded, side-labeled block with everything we need
+        to identify this sensor: firmware version, hardware ID, serial number,
+        and all 8 camera UIDs.
+
+        ``label`` is the side ("left"/"right") supplied by
+        :meth:`omotion.MotionInterface.log_sensor_info`; it tags the block so
+        the two sensors are distinguishable in the log. The whole block is
+        emitted as a single log record so it stays intact even when both
+        sensors log concurrently (camera UIDs that failed to read are shown
+        as ``<none>`` rather than dropped, so a dead camera stays visible).
+        """
+        title = (label or "sensor").upper()
         try:
             fw_version = self.get_version()
             hw_id      = self.get_cached_hardware_id() or self.get_hardware_id()
-            if self._cached_camera_uids:
-                uid_summary = ", ".join(
-                    f"cam{k}={v}" for k, v in sorted(self._cached_camera_uids.items()) if v
-                )
-            else:
-                uid_summary = "none cached"
-            logger.info(
-                "Sensor: firmware=%s  hw_id=%s  camera_uids=[%s]",
-                fw_version, hw_id, uid_summary,
-            )
+            serial     = self.read_serial_number() or "unprogrammed"
+            uids       = self._cached_camera_uids or {}
+            rule = "=" * 60
+            lines = [
+                rule,
+                f"{title} SENSOR",
+                f"  firmware = {fw_version}",
+                f"  hw_id    = {hw_id}",
+                f"  serial   = {serial}",
+                "  camera UIDs:",
+            ]
+            for cam in range(8):
+                lines.append(f"    cam{cam} = {uids.get(cam) or '<none>'}")
+            lines.append(rule)
+            logger.info("\n".join(lines))
         except Exception as e:
-            logger.warning("Sensor: failed to read device info: %s", e)
+            logger.warning("%s sensor: failed to read device info: %s", title, e)
 
 # Note: graceful disconnect is now driven by ConnectionMonitor via
 # `request_disconnect()` (which submits an EVT_USER_STOP). The old

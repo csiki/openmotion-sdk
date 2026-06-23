@@ -8,7 +8,7 @@ import time
 import pytest
 
 from omotion.CommandError import CommandError
-from omotion.Console import MuxChannel
+from omotion.config import MuxChannel
 from omotion.MotionConfig import MotionConfig
 
 pytestmark = pytest.mark.console
@@ -263,6 +263,38 @@ def test_trigger_start_stop_lsync(console):
 # ===========================================================================
 # 2.9 Configuration (MotionConfig)
 # ===========================================================================
+#
+# WARNING: the console user-config flash holds *live safety settings* — the TEC
+# over-temp trip temperature (TEC_TRIP) and the OPT/EE safety thresholds. Any
+# test that WRITES the config MUST snapshot it first and restore it afterward
+# (use the ``preserve_console_config`` fixture below). Leaving a test payload
+# behind wipes TEC_TRIP on real hardware, which silently DISABLES the over-temp
+# trip: the firmware guards it with ``TEC_TRIP_VALUE != 0.0``, and a missing
+# TEC_TRIP key leaves that value at 0 (== trip off).
+
+
+@pytest.fixture()
+def preserve_console_config(console):
+    """Snapshot the console user config and restore it after the test.
+
+    Yields the saved :class:`MotionConfig` (callers usually ignore it). On
+    teardown it rewrites the snapshot and verifies the round-trip, so a failed
+    restore surfaces as a test error instead of silently leaving the device in
+    a test state with its safety config wiped.
+    """
+    saved = console.read_config()
+    yield saved
+    if saved is not None:
+        console.write_config(saved)
+        readback = console.read_config()
+        assert readback is not None, (
+            "config restore failed: read_config returned None"
+        )
+        assert readback.json_data == saved.json_data, (
+            f"config restore mismatch: expected {saved.json_data}, "
+            f"got {readback.json_data}"
+        )
+
 
 def test_read_config(console):
     cfg = console.read_config()
@@ -270,7 +302,7 @@ def test_read_config(console):
         assert isinstance(cfg, MotionConfig)
 
 
-def test_write_read_config_roundtrip(console):
+def test_write_read_config_roundtrip(console, preserve_console_config):
     original_data = {"test_key": "test_value", "version": 1}
     mc = MotionConfig(json_data=original_data)
     console.write_config(mc)
@@ -280,7 +312,7 @@ def test_write_read_config_roundtrip(console):
     assert readback.json_data.get("version") == 1
 
 
-def test_write_config_json_roundtrip(console):
+def test_write_config_json_roundtrip(console, preserve_console_config):
     console.write_config_json('{"write_json_key": 42}')
     readback = console.read_config()
     assert readback is not None
@@ -410,6 +442,31 @@ def test_safety_interlock_clear(console):
         f"Safety interlock reported tripped "
         f"(SE=0x{snap.safety_se:02X}, SO=0x{snap.safety_so:02X})"
     )
+
+
+def test_console_serial_roundtrip(console):
+    original = console.read_serial_number()  # may be None on a fresh board
+    try:
+        assert console.write_serial_number("QWW04Q10003", force=True) is True
+        assert console.read_serial_number() == "QWW04Q10003"
+
+        # Guarded write must be refused now that a serial exists.
+        assert console.write_serial_number("ZZZ99Z99999", force=False) is False
+        assert console.read_serial_number() == "QWW04Q10003"
+
+        # Force overwrite succeeds.
+        assert console.write_serial_number("ZZZ99Z99999", force=True) is True
+        assert console.read_serial_number() == "ZZZ99Z99999"
+    finally:
+        if original:
+            console.write_serial_number(original, force=True)
+
+
+def test_console_serial_rejects_bad_input(console):
+    # Invalid input is rejected client-side; stored serial is unchanged.
+    before = console.read_serial_number()
+    assert console.write_serial_number("bad-serial!", force=True) is False
+    assert console.read_serial_number() == before
 
 
 # ===========================================================================

@@ -1,4 +1,5 @@
 import logging
+import queue
 import time
 import usb.core
 import usb.util
@@ -40,13 +41,12 @@ _FOOTER_SIZE = 3      # CRC(2) + EOF(1)
 _UNCMP_CRC_SIZE = 2
 
 
-try:
-    from omotion.utils import util_crc16 as _util_crc16
-except ImportError:
-    import binascii
+import binascii as _binascii
 
-    def _util_crc16(buf):
-        return binascii.crc_hqx(buf, 0xFFFF)
+
+def _util_crc16(buf) -> int:
+    """CRC-CCITT (polynomial 0x1021, init 0xFFFF) via the C implementation in binascii."""
+    return _binascii.crc_hqx(buf, 0xFFFF)
 
 
 def _decompress_histo_cmp(raw: bytes) -> bytes:
@@ -121,9 +121,25 @@ class StreamInterface(USBInterfaceBase):
         self.packets_received: int = 0  # USB transfers queued since last start_streaming
 
     def start_streaming(self, queue_obj, expected_size):
+        # Recover from a stale thread left over by a previous scan whose
+        # stop_streaming join timed out (e.g. queue was full at teardown,
+        # or a pipe error left the loop mid-dev.read). Bailing silently
+        # here used to wedge the next scan: the new queue was never wired
+        # to USB reads, so an entire side's data went nowhere.
         if self.thread and self.thread.is_alive():
-            logger.info(f"{self.desc}: Stream already running")
-            return
+            logger.warning(
+                "%s: stale stream thread still alive at start_streaming — "
+                "forcing stop and restarting", self.desc,
+            )
+            self.stop_event.set()
+            self.thread.join(timeout=2.0)
+            if self.thread.is_alive():
+                logger.error(
+                    "%s: stale stream thread refused to exit after 2s; "
+                    "abandoning it and starting a fresh one (the old thread "
+                    "will exit on its next dev.read after data_queue is reset)",
+                    self.desc,
+                )
         self.data_queue = queue_obj
         self.expected_size = expected_size
         self.packets_received = 0
@@ -137,6 +153,18 @@ class StreamInterface(USBInterfaceBase):
         self.stop_event.set()
         if self.thread:
             self.thread.join(timeout=2.0)
+            if self.thread.is_alive():
+                # The loop is most likely stuck in a blocking dev.read or in
+                # data_queue.put waiting on a slow parser. Nulling the read
+                # parameters below makes the next loop iteration exit; until
+                # then the thread is harmless (parker on USB or queue) but
+                # we should log it so the orphan is visible in the run log.
+                logger.warning(
+                    "%s: stream thread did not exit within 2s of stop "
+                    "(stuck in dev.read or data_queue.put); leaving "
+                    "data_queue/expected_size to be nulled — loop will exit "
+                    "on next iteration", self.desc,
+                )
         self.isStreaming = False
         self.data_queue = None
         self.expected_size = None
@@ -345,14 +373,41 @@ class StreamInterface(USBInterfaceBase):
         _READ_TIMEOUT_MS = 500
 
         while True:
+            # Check stop FIRST so a stop-then-clear race in stop_streaming
+            # (which nulls expected_size/data_queue after join times out)
+            # can't drive us back into dev.read with None args.
+            if self.stop_event.is_set():
+                break
+            # Snapshot the read parameters under the assumption stop_streaming
+            # may null them out concurrently. If they're already None the
+            # streaming session is over — exit instead of crashing inside
+            # libusb on `length * b'\x00'`.
+            expected_size = self.expected_size
+            data_queue = self.data_queue
+            if expected_size is None or data_queue is None:
+                break
             try:
                 data = self.dev.read(
-                    self.ep_in.bEndpointAddress, self.expected_size,
+                    self.ep_in.bEndpointAddress, expected_size,
                     timeout=_READ_TIMEOUT_MS,
                 )
-                if data and self.data_queue:
-                    self.data_queue.put(bytes(data))
-                    self.packets_received += 1
+                if data and data_queue is self.data_queue:
+                    # Use a bounded put so the loop can never block forever
+                    # on a stopped/slow parser. With self.stop_event set the
+                    # parser also drains until empty (see parse_histogram_stream),
+                    # so this drop window is only ever 1s of backlog at scan
+                    # teardown — small price for a guaranteed loop exit.
+                    try:
+                        data_queue.put(bytes(data), timeout=1.0)
+                        self.packets_received += 1
+                    except queue.Full:
+                        if self.stop_event.is_set():
+                            break
+                        logger.warning(
+                            "%s: data_queue full for >1s during streaming "
+                            "(parser falling behind?); dropping %d-byte chunk",
+                            self.desc, len(data),
+                        )
             except usb.core.USBError as e:
                 if e.errno in (110, 10060):
                     # Timeout — no data arrived within the read window.

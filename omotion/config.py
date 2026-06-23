@@ -1,4 +1,15 @@
+import re
 from enum import IntEnum
+
+import numpy as np
+
+_SERIAL_RE = re.compile(r"^[A-Z0-9]{1,24}\Z")
+
+
+def is_valid_serial(serial: str) -> bool:
+    """True if serial is 1-24 uppercase-alphanumeric chars (console or sensor)."""
+    return isinstance(serial, str) and bool(_SERIAL_RE.match(serial))
+
 
 SERIAL_PORT = "COM24"  # Change this to your serial port
 BAUD_RATE = 921600
@@ -14,6 +25,25 @@ ID_COUNTER = 0  # Initializing the ID counter
 # Histo Packet structure constants
 HISTO_SIZE_WORDS = 1024
 HISTO_BLOCK_SIZE = 1 + (HISTO_SIZE_WORDS * 4) + 1  # HID + HISTO + EOH
+
+# Bin-index arrays used by moment computations and CSV column naming.
+# HISTO_BINS[i] = i; HISTO_BINS_SQ[i] = i*i. Float64 so downstream Σ b·n(b)
+# and Σ b²·n(b) keep precision for ~2.4M-count histograms.
+HISTO_BINS: np.ndarray = np.arange(HISTO_SIZE_WORDS, dtype=np.float64)
+HISTO_BINS_SQ: np.ndarray = HISTO_BINS * HISTO_BINS
+
+# Full-well capacity of the OV2312 sensor in electrons. Used to compute
+# ADC gain (DN per electron) for shot-noise correction:
+#   ADC_GAIN = (HISTO_SIZE_WORDS - pedestal) / ELECTRON_WELL_CAPACITY
+ELECTRON_WELL_CAPACITY: int = 11_000
+
+# Per-camera analog gain for the 8 cameras in a sensor module, indexed by
+# cam_id % 8. Outer positions (0, 7) use higher gain to compensate for the
+# reduced illumination at the array periphery. Used by ShotNoiseCorrectionStage
+# and DarkCorrectionStage's enrichment path; see SciencePipeline.md §8.3.
+CAMERA_GAIN_MAP: np.ndarray = np.array(
+    [16, 4, 2, 1, 1, 2, 4, 16], dtype=np.float32
+)
 
 
 # Packet Types
@@ -104,6 +134,8 @@ OW_CMD_VERSION = 0x02
 OW_CMD_ECHO = 0x03
 OW_CMD_TOGGLE_LED = 0x04
 OW_CMD_HWID = 0x05
+OW_CMD_SERIAL = 0x07
+OW_CMD_I2C_REG_READ = 0x08
 OW_CMD_MESSAGES = 0x09
 OW_CMD_USR_CFG = 0x0A
 OW_CMD_DFU = 0x0D
@@ -111,6 +143,7 @@ OW_CMD_NOP = 0x0E
 OW_CMD_RESET = 0x0F
 OW_CMD_I2C_BROADCAST = 0x06
 OW_CMD_DEBUG_FLAGS = 0x0C
+OW_CMD_I2C_STATUS = 0x0B
 
 # Debug flag bits.
 DEBUG_FLAG_USB_PRINTF = 0x01  # Turn on or off USB printf logging
@@ -146,6 +179,16 @@ OW_CTRL_TECADC = 0x21
 OW_CTRL_TEC_STATUS = 0x22
 OW_CTRL_BOARDID = 0x23
 OW_CTRL_PDUMON = 0x24
+OW_CTRL_GET_PDC_BUFFER = 0x25
+# Lifetime usage counters persisted to console flash. System counter is minutes
+# of uptime (uint32, ~8000 yr range); laser counter is cumulative LSYNC pulses
+# across all scans (uint32, ~3.4 yr at 40 Hz continuous).
+OW_CTRL_GET_SYSTEM_ODO = 0x26
+OW_CTRL_GET_LASER_ODO = 0x27
+# Payload: 1 byte target (0=system, 1=laser, 2=both). Missing payload defaults
+# to both.
+OW_CTRL_RESET_ODO = 0x28
+OW_CTRL_I2C_STATUS = 0x29
 OW_CTRL_FAN_CTL = 0x0A
 
 # Page-by-page direct FPGA programming commands (0x30–0x3C)
@@ -166,6 +209,12 @@ FPGA_PROG_CFG_WRITE_PAGES = 0x3D  # Write N 16-byte CFG pages (N*16 bytes payloa
 FPGA_PROG_UFM_WRITE_PAGES = 0x3E  # Write N 16-byte UFM pages (N*16 bytes payload)
 FPGA_PROG_READ_STATUS = 0x3F  # Read 32-bit Status Register (no cfgEn required)
 
+OW_FACTORY_I2C_SCAN = 0x60
+OW_FACTORY_CRESET = 0x68
+OW_FACTORY_I2C_RD = 0x69
+OW_FACTORY_I2C_WR = 0x6A
+OW_FACTORY_I2C_WRRD = 0x6B
+OW_FACTORY_NVCM_CHECK = 0x6C
 
 TEST_PATTERN_BARS = 0x00
 TEST_PATTERN_SOLID = 0x01
@@ -198,6 +247,31 @@ COMMAND_MAX_SIZE: int = 4096
 MAX_DATA_PER_FRAME: int = COMMAND_MAX_SIZE - 12
 """Max payload bytes per frame (total - framing overhead)."""
 
+# ---------------------------------------------------------------------------
+# Hardware geometry — shared by Calibration, ScanWorkflow, CalibrationWorkflow.
+# ---------------------------------------------------------------------------
+MODULES: int = 2
+"""Number of sensor modules per device (left + right)."""
+
+CAMS_PER_MODULE: int = 8
+"""Cameras per sensor module (OV2312 array)."""
+
+CAPTURE_HZ: float = 40.0
+"""Histogram capture rate per camera, in Hz."""
+
+# ---------------------------------------------------------------------------
+# CalibrationWorkflow defaults.
+# ---------------------------------------------------------------------------
+CALIBRATION_I_MAX_MULTIPLIER: float = 2.0
+"""Multiplier applied to the average light-frame mean to derive I_max."""
+
+CALIBRATION_DEFAULT_SCAN_DELAY_SEC: int = 1
+"""Default lead-in skip per sub-scan, in seconds."""
+
+CALIBRATION_DEFAULT_MAX_DURATION_SEC: int = 600
+"""Default watchdog timeout for the whole calibration procedure, in seconds."""
+
+
 XO2_FLASH_PAGE_SIZE: int = 16
 """Bytes per page in the MachXO2 Configuration and UFM flash sectors."""
 
@@ -217,3 +291,49 @@ class MuxChannel(IntEnum):
     FPGA_TA = 1
     FPGA_SAFE_EE = 2
     FPGA_SAFE_OPT = 3
+
+
+# ---------------------------------------------------------------------------
+# Trigger config defaults
+#
+# Single source of truth for the JSON payload that
+# ``MotionConsole.set_trigger_json`` expects. Workflows
+# (CalibrationWorkflow, ScanWorkflow) consult this when their request
+# doesn't carry a ``trigger_config`` override; an app can also pass
+# ``MotionInterface(default_trigger_config=...)`` to layer its own
+# overrides on top of these defaults at construction time.
+#
+# Values match what the bloodflow-app and the early CLI scripts have
+# been hardcoding everywhere — extracted so changing the standard
+# 40 Hz pulse pattern is a one-file edit.
+# ---------------------------------------------------------------------------
+DEFAULT_TRIGGER_CONFIG: dict = {
+    "TriggerStatus":           2,     # 2 = laser ON, 1 = OFF
+    "TriggerFrequencyHz":      40,
+    "TriggerPulseWidthUsec":   500,
+    "LaserPulseDelayUsec":     100,
+    "LaserPulseWidthUsec":     500,
+    "LaserPulseSkipInterval":  600,
+    "LaserPulseSkipDelayUsec": 1800,
+    "EnableSyncOut":           True,
+    "EnableTaTrigger":         True,
+}
+
+
+def merge_trigger_config(*overrides) -> dict:
+    """Shallow-merge a stack of trigger-config overrides on top of
+    :data:`DEFAULT_TRIGGER_CONFIG`. Later args win over earlier ones;
+    ``None`` entries are skipped. The result is a fresh dict — safe
+    to mutate.
+
+    Use this whenever a workflow needs to resolve 'the' trigger
+    config from a request: caller passes
+    ``merge_trigger_config(interface.default_trigger_config_override,
+    request.trigger_config)`` and gets back a complete dict with all
+    keys populated.
+    """
+    out: dict = dict(DEFAULT_TRIGGER_CONFIG)
+    for override in overrides:
+        if override:
+            out.update(override)
+    return out

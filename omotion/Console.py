@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple, List
 
 from omotion import MOTIONUart, _log_root
-from omotion.ConsoleTelemetry import ConsoleTelemetryPoller
+from omotion.ConsoleTelemetry import ConsoleTelemetryPoller, TecStatsUnsupportedError
 from omotion.config import (
     FPGA_PROG_CFG_READ_PAGE,
     FPGA_PROG_CFG_RESET,
@@ -1383,7 +1383,7 @@ class MOTIONConsole:
             TEC_STATS_SIZE = struct.calcsize(TEC_STATS_FMT)  # 21 bytes
 
             if r.data_len < TEC_STATS_SIZE:
-                raise ValueError(
+                raise TecStatsUnsupportedError(
                     f"TecStats response too short: {r.data_len} bytes, expected {TEC_STATS_SIZE}"
                 )
             elif r.data_len > TEC_STATS_SIZE:
@@ -1413,6 +1413,11 @@ class MOTIONConsole:
                 f"{tec_volt:.6f}",
                 tec_good,
             )
+        except TecStatsUnsupportedError as e:
+            # Firmware returned a short payload; demote to debug so the
+            # background poller doesn't spam the console every second.
+            logger.debug("tec_status unsupported by firmware: %s", e)
+            raise
         except Exception as e:
             logger.error("Unexpected error during tec_status: %s", e)
             raise  # Re-raise the exception for the caller to handle

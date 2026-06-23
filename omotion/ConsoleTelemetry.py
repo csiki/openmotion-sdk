@@ -15,6 +15,13 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(f"{_log_root}.ConsoleTelemetry" if _log_root else "ConsoleTelemetry")
 
+
+class TecStatsUnsupportedError(ValueError):
+    """Raised when the console firmware returns a TEC status payload shorter
+    than the expected 21-byte TecStats struct (e.g. older firmware that does
+    not fully implement OW_CTRL_TEC_STATUS). Treated as a benign poll skip by
+    ConsoleTelemetryPoller rather than a hard error."""
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -232,7 +239,12 @@ class ConsoleTelemetryPoller:
         snap = ConsoleTelemetry(timestamp=time.time())
 
         try:
-            self._read_tec(snap)
+            try:
+                self._read_tec(snap)
+            except TecStatsUnsupportedError as exc:
+                # Firmware doesn't implement the full 21-byte TecStats yet.
+                # Log once at debug, continue polling the other subsystems.
+                logger.debug("ConsoleTelemetryPoller: TEC status unsupported (%s)", exc)
             self._read_pdu(snap)
             self._read_safety(snap)
             self._read_analog(snap)

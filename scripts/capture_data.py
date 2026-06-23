@@ -86,8 +86,8 @@ def main():
     target = "none"
     if console_connected and left_sensor and right_sensor:
         print("MOTION System fully connected.")
-        target = "both"
-    elif console_connected and left_sensor or right_sensor:
+        target = None  # run_on_sensors treats None as "all connected sensors"
+    elif console_connected and (left_sensor or right_sensor):
         if left_sensor:
             target = "left"
         if right_sensor:

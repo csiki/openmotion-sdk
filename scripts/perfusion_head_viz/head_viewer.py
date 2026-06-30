@@ -77,7 +77,7 @@ else:
     from ._head_volume import VolumeField  # type: ignore[no-redef]
     from ._particle_cloud import ParticleCloud  # type: ignore[no-redef]
 
-from omotion.Interface import MOTIONInterface
+from omotion import MotionInterface
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +228,7 @@ class PerfusionState:
 class MainWindow(QMainWindow):
     UI_REFRESH_MS = 50  # 20 Hz
 
-    def __init__(self, interface: MOTIONInterface,
+    def __init__(self, interface: MotionInterface,
                  args: argparse.Namespace) -> None:
         super().__init__()
         self._interface = interface
@@ -324,8 +324,8 @@ class MainWindow(QMainWindow):
         self._setup_scene()
 
         # Stream sinks
-        left_sensor = interface.sensors.get("left")
-        right_sensor = interface.sensors.get("right")
+        left_sensor = interface.left
+        right_sensor = interface.right
         self._left = SideStream(
             "left",
             left_sensor if (left_sensor and left_sensor.is_connected()) else None,
@@ -547,7 +547,7 @@ class MainWindow(QMainWindow):
             self._left.stop(self._log)
             return
         try:
-            started = self._interface.console_module.start_trigger()
+            started = self._interface.console.start_trigger()
         except Exception as e:
             self._log(f"start_trigger raised: {e}")
             started = False
@@ -571,7 +571,7 @@ class MainWindow(QMainWindow):
         self._timer.stop()
         if self._trigger_started:
             try:
-                self._interface.console_module.stop_trigger()
+                self._interface.console.stop_trigger()
             except Exception as e:
                 self._log(f"stop_trigger error: {e}")
             self._trigger_started = False
@@ -772,9 +772,12 @@ def main() -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
-    interface, console_ok, left_ok, right_ok = (
-        MOTIONInterface.acquire_motion_interface()
-    )
+    interface = MotionInterface()
+    interface.start(wait=True)
+    # Devices enumerate asynchronously via the hotplug monitor, so block
+    # until the console + at least one sensor reach CONNECTED before reading.
+    interface.wait_for_ready(console=True, sensors=1, timeout=10.0)
+    console_ok, left_ok, right_ok = interface.is_device_connected()
     if not console_ok:
         print("[head_viewer] Console not connected.")
         return 1

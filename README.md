@@ -87,24 +87,80 @@ python scripts/visualize_scan.py --csv <scan_id>_<subject>.csv   # -> <stem>_viz
 
 ## Install
 
-```powershell
-# Editable install for local dev
-pip install -e ".[dev]"
+Requires **Python 3.12+**. `pip install -e .` makes the `omotion` library
+importable and installs its core deps; `requirements.txt` adds the GUI / 3D
+visualization stack (PyQt6, pyvista, …) used by `scripts/`, which the editable
+install does *not* pull in.
 
-# Or build a wheel for an app to consume
-python -m build                                  # -> dist/openmotion_sdk-*.whl
-pip install --force-reinstall dist/openmotion_sdk-*.whl
+### pip + venv
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1                 # macOS/Linux: source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[dev]"            # SDK (editable) + test tooling
+python -m pip install -r requirements.txt    # runtime + GUI/3D viewer deps
 ```
 
-- **Python 3.12+.** Version is computed from git tags via `setuptools_scm` —
-  never edit a version string by hand; tag and push to release.
-- **Windows USB:** sensors need WinUSB via Zadig (`pyusb` + `libusb`); the
-  console uses the OS VCP driver. `dfu-util` is vendored under `omotion/dfu-util/`.
+### conda
+
+```powershell
+conda create -n omotion python=3.13          # any 3.12+ works
+conda activate omotion
+python -m pip install -e ".[dev]"
+python -m pip install -r requirements.txt
+```
+
+> **PyQt6** is required by the live viewers and is included in
+> `requirements.txt`. If you ever hit `ModuleNotFoundError: PyQt6`, install it
+> directly: `python -m pip install PyQt6`.
+
+- Version is computed from git tags via `setuptools_scm` — never edit a version
+  string by hand; tag and push to release.
+- Build a wheel for an app to consume:
+  `python -m build` → `pip install --force-reinstall dist/openmotion_sdk-*.whl`.
+- **Windows USB:** sensors need WinUSB (`pyusb` + `libusb`); the console uses the
+  OS VCP driver. `dfu-util` is vendored under `omotion/dfu-util/`. Driver setup
+  is covered in *Starting a session* below.
 
 ```powershell
 # quick runtime check (device bound to WinUSB/libusbK)
 python -c "import usb, omotion.usb_backend as ub; print(ub.get_libusb1_backend())"
 ```
+
+## Starting a session
+
+1. **Plug in** the Console and at least one Sensor module over USB (use a data
+   cable, not charge-only; avoid hubs).
+2. **Windows, first time only** — install the sensor WinUSB driver. The console
+   uses the built-in serial driver and needs no setup.
+   ```powershell
+   # in an Administrator shell
+   .\drivers\windows\install.bat
+   ```
+   Then unplug/replug the sensor and verify all three interfaces bound:
+   ```powershell
+   Get-PnpDevice -PresentOnly | Where-Object InstanceId -match 'VID_0483&PID_5A5A&MI'
+   # expect Status=OK, Service=WinUSB for MI_00 / MI_01 / MI_02
+   ```
+   (Linux/macOS driver notes live in [`drivers/README.md`](drivers/README.md).)
+3. **Activate** your environment (`.\.venv\Scripts\Activate.ps1` or
+   `conda activate omotion`).
+4. **Launch a viewer:**
+   ```powershell
+   # 3D perfusion head (particle cloud + volume); --quick = 2 cams/side, fast bring-up
+   python scripts/perfusion_head_viz/head_viewer.py --quick
+
+   # or 2D live histograms / BFI
+   python scripts/dual_live_viewer.py                       # both sensors
+   python scripts/live_viewer.py --side left --camera-mask 0x01
+   ```
+5. **Click Start** in the window. The first start programs the FPGA (a few
+   seconds per camera), starts the console trigger, then streams. In the 3D
+   viewer: **R** reset view · **P** toggle cardiac pulse · **V** cycle view.
+
+No hardware on hand? Use `MotionInterface(demo_mode=True)` (see
+*Without hardware*) for synthetic data.
 
 ## Documentation
 

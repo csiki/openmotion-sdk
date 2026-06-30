@@ -64,7 +64,6 @@ class ParserThread(threading.Thread):
         parse_histogram_stream(
             q=self._q,
             stop_evt=self._stop_evt,
-            csv_writer=None,
             buffer_accumulator=self._accum,
             on_row_fn=self._wrapped,
         )

@@ -34,7 +34,7 @@ from PyQt6.QtWidgets import (
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
-from omotion.Interface import MOTIONInterface
+from omotion import MotionInterface
 from omotion.MotionProcessing import parse_histogram_stream
 
 STREAM_EXPECTED_SIZE = 32833  # per capture_data.py / SDK constant
@@ -184,11 +184,11 @@ class HistogramCanvas(FigureCanvasQTAgg):
 class MainWindow(QMainWindow):
     UI_REFRESH_MS = 50  # 20 Hz redraw
 
-    def __init__(self, interface: MOTIONInterface, args: argparse.Namespace) -> None:
+    def __init__(self, interface: MotionInterface, args: argparse.Namespace) -> None:
         super().__init__()
         self._interface = interface
         self._args = args
-        self._sensor = interface.sensors.get(args.side)
+        self._sensor = getattr(interface, args.side)
         self._cam_positions = mask_to_cam_positions(args.camera_mask)
         self._buffer = LatestSampleBuffer()
         self._queue: queue.Queue | None = None
@@ -279,7 +279,7 @@ class MainWindow(QMainWindow):
             self._queue, expected_size=STREAM_EXPECTED_SIZE
         )
 
-        if not self._interface.console_module.start_trigger():
+        if not self._interface.console.start_trigger():
             print("[live_viewer] start_trigger failed.")
             return
 
@@ -295,7 +295,7 @@ class MainWindow(QMainWindow):
         self._timer.stop()
 
         try:
-            self._interface.console_module.stop_trigger()
+            self._interface.console.stop_trigger()
         except Exception as e:
             print(f"[live_viewer] stop_trigger error: {e}")
 
@@ -341,7 +341,12 @@ class MainWindow(QMainWindow):
 def main() -> int:
     args = parse_args()
 
-    interface, console_ok, left_ok, right_ok = MOTIONInterface.acquire_motion_interface()
+    interface = MotionInterface()
+    interface.start(wait=True)
+    # Devices enumerate asynchronously via the hotplug monitor, so block
+    # until the console + at least one sensor reach CONNECTED before reading.
+    interface.wait_for_ready(console=True, sensors=1, timeout=10.0)
+    console_ok, left_ok, right_ok = interface.is_device_connected()
     side_ok = left_ok if args.side == "left" else right_ok
     if not console_ok:
         print("[live_viewer] Console not connected.")
